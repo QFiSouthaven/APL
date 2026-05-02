@@ -7,6 +7,7 @@ plain `ui.label` log entries the early Studio scaffold used.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from nicegui import ui
@@ -25,6 +26,7 @@ def render_pass_card(
     technique: str | None = None,
     scores: dict[str, int] | None = None,
     error: str | None = None,
+    on_branch: Callable[[int], None] | None = None,
 ) -> ui.element:
     """Build a card and return its outer element so the caller can update it.
 
@@ -64,7 +66,23 @@ def render_pass_card(
         else:
             ui.markdown(f"```\n{content or ''}\n```")
 
-        with ui.row().classes("justify-end"):
+        with ui.row().classes("justify-end gap-1"):
+            # "Branch from here" — only on completed (non-error) passes 1-3.
+            # Pass 4 cannot be a branch point (Pass 4 always re-runs against
+            # the new prompt; see pipeline.py BranchError guard).
+            if (
+                on_branch is not None
+                and not error
+                and 1 <= pass_number <= 3
+            ):
+                ui.button(
+                    "↗ Branch from here",
+                    on_click=lambda p=pass_number: on_branch(p),
+                ).props("flat dense").tooltip(
+                    "Fork a new run that reuses passes 1.."
+                    f"{pass_number} verbatim and re-runs the rest "
+                    "against a new prompt."
+                )
             ui.button(
                 icon="content_copy", on_click=lambda c=content: _copy(c),
             ).props("flat dense").tooltip("Copy")

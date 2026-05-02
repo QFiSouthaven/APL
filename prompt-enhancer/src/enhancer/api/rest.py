@@ -18,10 +18,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from dataclasses import fields
+
 from . import ENVELOPE_SCHEMA_VERSION
 from .discovery import get_all_peers
 from .. import __version__
-from ..config import db_path, jsonl_log_path, load
+from ..config import Settings, db_path, jsonl_log_path, load, save_settings
 from ..core.events import EventType
 from ..core.pipeline import PipelineOptions, build_resume_state, run_pipeline
 from ..llm.registry import get_provider
@@ -92,6 +94,59 @@ async def health() -> HealthResponse:
 async def peers() -> dict[str, dict[str, str]]:
     """Return the configured peer service URLs."""
     return {"services": get_all_peers()}
+
+
+@router.post("/settings")
+async def update_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist settings to the TOML file at ``config.settings_path()``.
+
+    Accepts a JSON object whose keys match ``Settings`` fields. Unknown
+    keys → 400. Values that cannot be coerced to the field's type → 400.
+    The current settings (read via ``config.load()``) are merged with
+    the incoming payload so callers can patch a subset of fields.
+    """
+    valid_names = {f.name: type(getattr(Settings(), f.name)) for f in fields(Settings)}
+
+    # Reject unknown keys.
+    unknown = set(payload.keys()) - set(valid_names.keys())
+    if unknown:
+        raise HTTPException(400, detail=f"Unknown setting keys: {sorted(unknown)}")
+
+    # Type-validate each provided key against its dataclass field type.
+    coerced: dict[str, Any] = {}
+    for name, raw in payload.items():
+        expected = valid_names[name]
+        try:
+            if expected is bool:
+                if not isinstance(raw, bool):
+                    raise TypeError(f"{name} must be bool")
+                coerced[name] = raw
+            elif expected is int:
+                # Reject bool-as-int (Python: True == 1) for clarity.
+                if isinstance(raw, bool) or not isinstance(raw, int):
+                    raise TypeError(f"{name} must be int")
+                coerced[name] = raw
+            elif expected is float:
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                    raise TypeError(f"{name} must be number")
+                coerced[name] = float(raw)
+            elif expected is str:
+                if not isinstance(raw, str):
+                    raise TypeError(f"{name} must be string")
+                coerced[name] = raw
+            else:  # pragma: no cover — Settings only uses these four types
+                raise TypeError(f"unsupported type for {name}")
+        except TypeError as exc:
+            raise HTTPException(400, detail=str(exc)) from exc
+
+    # Merge into current settings — partial updates are supported.
+    current = load()
+    merged_kwargs = {f.name: getattr(current, f.name) for f in fields(Settings)}
+    merged_kwargs.update(coerced)
+    new_settings = Settings(**merged_kwargs)
+
+    written = save_settings(new_settings)
+    return {"ok": True, "path": str(written)}
 
 
 @router.post("/enhance", response_model=EnhancedEnvelope)

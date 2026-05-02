@@ -104,6 +104,23 @@ def _show_detail(container: ui.element, run_id: str | None) -> None:
                      f"model: {record.get('model') or '—'}").classes(
                 "text-caption text-grey"
             )
+            # Branch-from-this-run controls. Pass 4 is intentionally
+            # absent because Pass 4 always re-runs against the new prompt
+            # (see pipeline.py BranchError guard).
+            with ui.row().classes("gap-2 items-center mt-2"):
+                ui.label("↗ Branch from this run").classes(
+                    "text-caption text-white"
+                )
+                for p in (1, 2, 3):
+                    ui.button(
+                        f"Pass {p}",
+                        on_click=lambda p=p, rid=record["id"]: ui.navigate.to(
+                            f"/?branch_from={rid}&pass={p}"
+                        ),
+                    ).props("flat dense").tooltip(
+                        f"Open Studio with this run's Pass 1..{p} reused "
+                        "and a fresh prompt area for the new branch."
+                    )
 
         with ui.expansion("Original ↔ Enhanced diff", icon="compare",
                           value=True).classes("w-full"):

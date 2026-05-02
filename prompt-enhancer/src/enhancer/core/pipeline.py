@@ -21,6 +21,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..llm.base import ChatProvider
@@ -66,6 +67,10 @@ DISAMBIGUATE_THRESHOLD = 3
 
 # ── input options & resume state ──────────────────────────────────────
 
+class BranchError(Exception):
+    """Raised when a branch run cannot be initialized (missing parent, etc.)."""
+
+
 @dataclass
 class PipelineOptions:
     """User-controlled knobs for one pipeline run."""
@@ -79,6 +84,14 @@ class PipelineOptions:
     max_tokens_scale: float = 1.0
     # Internal — used by disambiguation resume; do not set from UI.
     resume_state: dict[str, Any] | None = None
+    # Branching — set when forking from a previous run at a given pass.
+    # ``branch_from_pass`` ∈ {1, 2, 3} indicates the last pass to copy
+    # verbatim from the parent. ``parent_run_id`` is the parent's run id.
+    # ``branch_db_path`` lets the pipeline load the parent record; when
+    # ``None`` the default :func:`config.db_path` is used.
+    branch_from_pass: int | None = None
+    parent_run_id: str | None = None
+    branch_db_path: Path | None = None
 
 
 @dataclass
@@ -193,6 +206,54 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
     temperature = opts.temperature
     max_tokens_scale = opts.max_tokens_scale
 
+    # ── Branch initialization (optional) ─────────────────────────────
+    # When ``parent_run_id`` is set, load the parent run's stored pass
+    # outputs and reuse them up to and including ``branch_from_pass``.
+    # Pass 4 + transforms always re-run because they depend on the new
+    # prompt. We re-use the AGENT_STEP event (the EventType enum is
+    # frozen — see ``docs/EXTRACTION_GOTCHAS.md``) plus add ``parent_*``
+    # keys to identify the branch.
+    branch_state: dict[str, Any] | None = None
+    if opts.parent_run_id is not None:
+        branch_from_pass = opts.branch_from_pass
+        if branch_from_pass is None or branch_from_pass < 1:
+            raise BranchError(
+                f"branch_from_pass must be ≥ 1 when parent_run_id is set "
+                f"(got {branch_from_pass!r})"
+            )
+        if branch_from_pass > 3:
+            raise BranchError(
+                f"branch_from_pass must be ≤ 3 (got {branch_from_pass}); "
+                "Pass 4 always re-runs against the new prompt."
+            )
+        # Resolve parent record; raise a domain error (not IntegrityError)
+        # if the parent does not exist so the caller sees a clean failure.
+        from ..persistence import runs as _runs_mod
+        from ..config import db_path as _default_db_path
+
+        bdb = opts.branch_db_path or _default_db_path()
+        parent = _runs_mod.get_run(bdb, opts.parent_run_id)
+        if parent is None:
+            raise BranchError(
+                f"parent run {opts.parent_run_id!r} not found in {bdb}"
+            )
+        branch_state = {
+            "parent_run_id": opts.parent_run_id,
+            "branch_from_pass": branch_from_pass,
+            "pass1": parent.get("pass1_output") or "",
+            "pass2": parent.get("pass2_output") or "",
+            "task_type": parent.get("task_type") or "",
+            "technique": parent.get("technique") or "precision",
+            "parent_enhanced": parent.get("enhanced_prompt") or "",
+        }
+        await _emit(
+            on_event, EventType.AGENT_STEP,
+            step="branch_start",
+            parent_run_id=opts.parent_run_id,
+            parent_pass=branch_from_pass,
+            detail=f"branched from {opts.parent_run_id[:8]} @ Pass {branch_from_pass}",
+        )
+
     # ── budgets ─────────────────────────────────────────────────────
     char_budget = DEFAULT_CHAR_BUDGET
     try:
@@ -235,6 +296,28 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
         p2_duration_ms = rs.get("p2_duration_ms", 0)
         await _emit(on_event, EventType.AGENT_STEP,
                     step="resume", detail="resumed after clarifications")
+    elif branch_state is not None and branch_state["branch_from_pass"] >= 2:
+        # Branching from Pass 2 or later — reuse parent's Pass 1 + Pass 2
+        # analyses verbatim. Pass 3 will run against the NEW prompt, so
+        # transforms reflect the user's iteration.
+        pass1 = branch_state["pass1"]
+        pass2 = branch_state["pass2"]
+        task_type = branch_state["task_type"] or coerce_task_type_for_code(
+            parse_task_type(pass1), prompt
+        )
+        technique = branch_state["technique"] or parse_technique(pass2)
+        disambig_ctx = ""
+        # Re-emit the parent's pass results so the UI status strip lights
+        # up correctly without ever calling the provider for them.
+        await _emit(on_event, EventType.AGENT_PASS_RESULT,
+                    pass_number=1, pass_name=PASS_NAMES[1],
+                    content=pass1, model=model,
+                    duration_ms=0, task_type=task_type)
+        await _emit(on_event, EventType.AGENT_PASS_RESULT,
+                    pass_number=2, pass_name=PASS_NAMES[2],
+                    content=pass2, model=model,
+                    duration_ms=0, technique=technique)
+        t1 = time.monotonic()
     else:
         # Pass 1 — Intent Analysis
         await _emit(on_event, EventType.AGENT_PASS_START,
@@ -380,59 +463,69 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
         t2_effective = t2
 
     # ── Pass 3 — Task-aware Rewrite (streamed) ──────────────────────
-    await _emit(on_event, EventType.AGENT_PASS_START,
-                pass_number=3, pass_name=PASS_NAMES[3], model=model)
-
-    technique_guidance = TECHNIQUE_GUIDANCE.get(technique, "")
-    pass3_user_parts = [
-        f"Original prompt:\n{truncate(prompt, char_budget // 3, 'p3-prompt')}\n",
-        f"Intent analysis:\n{truncate(pass1, char_budget // 4, 'p3-pass1')}\n",
-        f"Weakness analysis:\n{truncate(pass2, char_budget // 4, 'p3-pass2')}\n",
-    ]
-    if technique_guidance:
-        pass3_user_parts.append(technique_guidance + "\n")
-    if disambig_ctx:
-        pass3_user_parts.append(disambig_ctx + "\n")
-    if session_context:
-        pass3_user_parts.append(
-            "[SESSION CONTEXT]\n"
-            + truncate(session_context, char_budget // 2, "p3-session")
-            + "\n[END SESSION CONTEXT]\n"
-        )
-
-    pass3_user = "\n".join(pass3_user_parts)
-
     pass3_partial = False
-    enhanced_chunks: list[str] = []
-    try:
-        async for tok in provider.chat_stream(
-            messages=[
-                {"role": "system", "content": pass3_system},
-                {"role": "user", "content": pass3_user},
-            ],
-            model=model, temperature=temperature,
-            max_tokens=scaled(budgets.rewrite, max_tokens_scale),
-            timeout=request_timeout, idle_timeout=idle_timeout,
-        ):
-            enhanced_chunks.append(tok)
-            await _emit(on_event, EventType.AGENT_PASS_CHUNK,
-                        pass_number=3, token=tok)
-    except Exception as exc:  # noqa: BLE001
-        pass3_partial = True
-        if not enhanced_chunks:
-            # Fall back to original prompt — Pass 4 will be skipped because
-            # comparing prompt-vs-prompt wastes a call. Documented in
-            # docs/EXTRACTION_GOTCHAS.md §9.
-            enhanced_chunks.append(prompt)
-        await _emit(on_event, EventType.AGENT_ERROR,
-                    step="pass3", error=str(exc))
+    if branch_state is not None and branch_state["branch_from_pass"] >= 3:
+        # Branching from Pass 3 — keep parent's enhanced verbatim. Pass 4
+        # still runs against the new ``prompt`` so scoring reflects the
+        # reused enhancement vs. the new original.
+        enhanced = branch_state["parent_enhanced"]
+        t3 = time.monotonic()
+        await _emit(on_event, EventType.AGENT_PASS_RESULT,
+                    pass_number=3, pass_name=PASS_NAMES[3],
+                    content=enhanced, model=model, duration_ms=0)
+    else:
+        await _emit(on_event, EventType.AGENT_PASS_START,
+                    pass_number=3, pass_name=PASS_NAMES[3], model=model)
 
-    enhanced = "".join(enhanced_chunks)
-    t3 = time.monotonic()
-    await _emit(on_event, EventType.AGENT_PASS_RESULT,
-                pass_number=3, pass_name=PASS_NAMES[3],
-                content=enhanced, model=model,
-                duration_ms=int((t3 - t2_effective) * 1000))
+        technique_guidance = TECHNIQUE_GUIDANCE.get(technique, "")
+        pass3_user_parts = [
+            f"Original prompt:\n{truncate(prompt, char_budget // 3, 'p3-prompt')}\n",
+            f"Intent analysis:\n{truncate(pass1, char_budget // 4, 'p3-pass1')}\n",
+            f"Weakness analysis:\n{truncate(pass2, char_budget // 4, 'p3-pass2')}\n",
+        ]
+        if technique_guidance:
+            pass3_user_parts.append(technique_guidance + "\n")
+        if disambig_ctx:
+            pass3_user_parts.append(disambig_ctx + "\n")
+        if session_context:
+            pass3_user_parts.append(
+                "[SESSION CONTEXT]\n"
+                + truncate(session_context, char_budget // 2, "p3-session")
+                + "\n[END SESSION CONTEXT]\n"
+            )
+
+        pass3_user = "\n".join(pass3_user_parts)
+
+        enhanced_chunks: list[str] = []
+        try:
+            async for tok in provider.chat_stream(
+                messages=[
+                    {"role": "system", "content": pass3_system},
+                    {"role": "user", "content": pass3_user},
+                ],
+                model=model, temperature=temperature,
+                max_tokens=scaled(budgets.rewrite, max_tokens_scale),
+                timeout=request_timeout, idle_timeout=idle_timeout,
+            ):
+                enhanced_chunks.append(tok)
+                await _emit(on_event, EventType.AGENT_PASS_CHUNK,
+                            pass_number=3, token=tok)
+        except Exception as exc:  # noqa: BLE001
+            pass3_partial = True
+            if not enhanced_chunks:
+                # Fall back to original prompt — Pass 4 will be skipped because
+                # comparing prompt-vs-prompt wastes a call. Documented in
+                # docs/EXTRACTION_GOTCHAS.md §9.
+                enhanced_chunks.append(prompt)
+            await _emit(on_event, EventType.AGENT_ERROR,
+                        step="pass3", error=str(exc))
+
+        enhanced = "".join(enhanced_chunks)
+        t3 = time.monotonic()
+        await _emit(on_event, EventType.AGENT_PASS_RESULT,
+                    pass_number=3, pass_name=PASS_NAMES[3],
+                    content=enhanced, model=model,
+                    duration_ms=int((t3 - t2_effective) * 1000))
 
     # ── Pass 4 — Quality Scoring (background task) ──────────────────
     pass4_task: asyncio.Task | None = None
@@ -619,6 +712,8 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
         scores_fallback=scores_fallback,
         pass3_partial=pass3_partial,
         session_id=opts.session_id,
+        parent_run_id=opts.parent_run_id,
+        parent_pass=opts.branch_from_pass,
     )
 
     await _emit(on_event, EventType.AGENT_DONE,

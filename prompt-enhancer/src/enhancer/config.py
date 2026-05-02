@@ -9,17 +9,33 @@ called another). Here we read on demand instead.
 Settings file lives at:
     Windows: %APPDATA%\\prompt-enhancer\\settings.toml
     Linux/macOS: ~/.config/prompt-enhancer/settings.toml
+
+Precedence (lowest → highest): dataclass defaults < TOML file < env vars.
+The TOML file is optional — if absent or malformed, ``load()`` falls
+back to defaults (with env-var overrides) and never raises.
 """
 
 from __future__ import annotations
 
+import logging
 import os
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, fields
 from pathlib import Path
+from typing import Any
 
 from platformdirs import user_config_dir, user_data_dir
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover — py3.10 fallback
+    import tomli as tomllib  # type: ignore[no-redef]
+
+import tomli_w
+
 APP_NAME = "prompt-enhancer"
+
+logger = logging.getLogger("enhancer.config")
 
 
 # ── paths ──────────────────────────────────────────────────────────────────
@@ -59,7 +75,7 @@ class Settings:
     lms_base_url: str = "http://127.0.0.1:1234/v1"
     lms_management_url: str = "http://localhost:1234"
     default_model: str = ""  # empty → first available at runtime
-    scorer_model: str = ""   # empty → same as default_model
+    scorer_model: str = ""   # same as default_model when empty
     request_timeout: float = 600.0
     idle_timeout: float = 120.0
 
@@ -76,42 +92,130 @@ class Settings:
     methodology_agent_enabled: bool = True
 
 
+# Map dataclass-field-name → ENHANCER_<NAME> env-var suffix.
+_ENV_SUFFIX = {
+    "provider": "PROVIDER",
+    "lms_base_url": "LMS_BASE_URL",
+    "lms_management_url": "LMS_MANAGEMENT_URL",
+    "default_model": "DEFAULT_MODEL",
+    "scorer_model": "SCORER_MODEL",
+    "request_timeout": "REQUEST_TIMEOUT",
+    "idle_timeout": "IDLE_TIMEOUT",
+    "temperature": "TEMPERATURE",
+    "max_tokens_scale": "MAX_TOKENS_SCALE",
+    "disambiguate_threshold": "DISAMBIGUATE_THRESHOLD",
+    "ui_port": "UI_PORT",
+    "ui_host": "UI_HOST",
+    "methodology_agent_enabled": "METHODOLOGY_AGENT_ENABLED",
+}
+
+
+def _coerce(field_type: type, value: Any, default: Any) -> Any:
+    """Coerce ``value`` into ``field_type``; return ``default`` on failure."""
+    try:
+        if field_type is bool:
+            if isinstance(value, bool):
+                return value
+            return str(value).strip().lower() in {"1", "true", "yes", "on"}
+        if field_type is int:
+            return int(value)
+        if field_type is float:
+            return float(value)
+        if field_type is str:
+            return str(value)
+    except (TypeError, ValueError):
+        return default
+    return default
+
+
+def _read_toml_file(path: Path) -> dict[str, Any]:
+    """Parse the settings TOML file; return {} if missing or malformed."""
+    if not path.exists():
+        return {}
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        logger.warning("Malformed settings TOML at %s: %s — using defaults", path, exc)
+        # Try the .bak as a last-ditch recovery.
+        bak = path.with_suffix(path.suffix + ".bak")
+        if bak.exists():
+            try:
+                with bak.open("rb") as f:
+                    data = tomllib.load(f)
+                if isinstance(data, dict):
+                    logger.info("Recovered settings from %s", bak)
+                    return data
+            except (OSError, tomllib.TOMLDecodeError):
+                pass
+        return {}
+
+
 def load() -> Settings:
-    """Read settings from env vars; the TOML file is layered in v0.2.
+    """Read settings with precedence: defaults < TOML file < env vars.
 
-    Env vars take the form ``ENHANCER_<UPPER_FIELD_NAME>``.
+    The TOML file is optional. Env vars use the form
+    ``ENHANCER_<UPPER_FIELD_NAME>``. Failures at any layer fall back to
+    the layer below — this function never raises.
     """
-    def _get(name: str, default: str) -> str:
-        return os.environ.get(f"ENHANCER_{name}", default)
+    defaults = Settings()
+    toml_data = _read_toml_file(settings_path())
 
-    def _getf(name: str, default: float) -> float:
-        try:
-            return float(_get(name, str(default)))
-        except (TypeError, ValueError):
-            return default
+    values: dict[str, Any] = {}
+    for f in fields(Settings):
+        default = getattr(defaults, f.name)
+        # ``from __future__ import annotations`` means f.type is a string
+        # — derive the real type from the default value instead. (All
+        # Settings fields use bool/int/float/str defaults, never None.)
+        ftype = type(default)
+        # Layer 1: TOML
+        if f.name in toml_data:
+            values[f.name] = _coerce(ftype, toml_data[f.name], default)
+        else:
+            values[f.name] = default
+        # Layer 2: env override
+        env_name = f"ENHANCER_{_ENV_SUFFIX[f.name]}"
+        if env_name in os.environ:
+            values[f.name] = _coerce(ftype, os.environ[env_name], values[f.name])
 
-    def _geti(name: str, default: int) -> int:
-        try:
-            return int(_get(name, str(default)))
-        except (TypeError, ValueError):
-            return default
+    return Settings(**values)
 
-    def _getb(name: str, default: bool) -> bool:
-        raw = _get(name, "1" if default else "0").strip().lower()
-        return raw in {"1", "true", "yes", "on"}
 
-    return Settings(
-        provider=_get("PROVIDER", "lmstudio"),
-        lms_base_url=_get("LMS_BASE_URL", "http://127.0.0.1:1234/v1"),
-        lms_management_url=_get("LMS_MANAGEMENT_URL", "http://localhost:1234"),
-        default_model=_get("DEFAULT_MODEL", ""),
-        scorer_model=_get("SCORER_MODEL", ""),
-        request_timeout=_getf("REQUEST_TIMEOUT", 600.0),
-        idle_timeout=_getf("IDLE_TIMEOUT", 120.0),
-        temperature=_getf("TEMPERATURE", 0.7),
-        max_tokens_scale=_getf("MAX_TOKENS_SCALE", 1.0),
-        disambiguate_threshold=_geti("DISAMBIGUATE_THRESHOLD", 3),
-        ui_port=_geti("UI_PORT", 8765),
-        ui_host=_get("UI_HOST", "127.0.0.1"),
-        methodology_agent_enabled=_getb("METHODOLOGY_AGENT_ENABLED", True),
-    )
+def _atomic_write_toml(path: Path, payload: dict[str, Any]) -> None:
+    """Atomic-rename write with .bak retention of the previous file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    bak = path.with_suffix(path.suffix + ".bak")
+    serialized = tomli_w.dumps(payload)
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(serialized)
+            f.flush()
+            os.fsync(f.fileno())
+        if path.exists():
+            try:
+                bak.write_bytes(path.read_bytes())
+            except OSError as exc:
+                logger.warning("Backup write failed for %s: %s", path, exc)
+        os.replace(tmp, path)
+    except OSError:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def save_settings(settings: Settings) -> Path:
+    """Write ``settings`` to the TOML file (atomic, .bak-backed).
+
+    Returns the absolute path written.
+    """
+    payload: dict[str, Any] = {f.name: getattr(settings, f.name) for f in fields(Settings)}
+    target = settings_path()
+    _atomic_write_toml(target, payload)
+    return target.resolve()

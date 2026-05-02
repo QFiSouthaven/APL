@@ -65,6 +65,18 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
     settings = load()
     _sidebar()
 
+    # Read branch query params (set by the History page's "Branch from this
+    # run" button — e.g. /?branch_from=abc12345&pass=2). When present, we
+    # preload the parent's prompt into the input so the user can edit it
+    # before clicking Enhance.
+    try:
+        from nicegui import context as _ng_ctx
+        _query = dict(_ng_ctx.client.request.query_params)  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 — older NiceGUI builds, fall back
+        _query = {}
+    branch_preload_id = _query.get("branch_from")
+    branch_preload_pass = _query.get("pass")
+
     # ── Right-side session drawer (toggleable) ──────────────────────
     drawer = SessionDrawer(db_path())
     drawer.render()
@@ -99,6 +111,10 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
             live_tokens_lbl = ui.label("").classes("text-caption text-grey")
             live_time_lbl = ui.label("").classes("text-caption text-grey")
             live_rate_lbl = ui.label("").classes("text-caption text-grey")
+        # Branch badge — visible only when this run was forked from a parent.
+        branch_badge = ui.label("").classes("text-caption").style(
+            "color: var(--accent); display: none;"
+        )
 
     # ── Tabs
     with ui.tabs().classes("w-full") as tabs:
@@ -121,7 +137,22 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
         "captured_disambig": {},
         # Live-streaming indicator — what the timer polls.
         "live": {"phase": "", "tokens": 0, "start_ts": None},
+        # Last completed run id — used as the parent for "Branch from here"
+        # buttons that appear on each pass card.
+        "last_run_id": None,
+        # Pending branch request, set by clicking ↗ on a pass card or by
+        # query params from the History page. Cleared after Enhance fires.
+        "branch": None,  # {"parent_run_id": str, "branch_from_pass": int}
     }
+    # Apply the History-page preload, if any.
+    if branch_preload_id and branch_preload_pass:
+        try:
+            state["branch"] = {
+                "parent_run_id": branch_preload_id,
+                "branch_from_pass": int(branch_preload_pass),
+            }
+        except (TypeError, ValueError):
+            pass
 
     def _refresh_live() -> None:
         """Polled every 0.5 s; updates the streaming-progress labels.
@@ -192,6 +223,25 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
             run_btn = ui.button("Enhance", icon="auto_fix_high")
             ui.button("Clear", on_click=lambda: prompt_input.set_value("")).props("flat")
 
+    # If we arrived via History page's "Branch from this run" button,
+    # preload the parent's prompt so the user can edit then Enhance.
+    if state.get("branch") is not None:
+        try:
+            parent = runs_module.get_run(
+                db_path(), state["branch"]["parent_run_id"]
+            )
+        except Exception:  # noqa: BLE001
+            parent = None
+        if parent:
+            prompt_input.set_value(parent.get("prompt") or "")
+            branch_badge.set_text(
+                f"Will branch from {state['branch']['parent_run_id'][:8]} "
+                f"@ Pass {state['branch']['branch_from_pass']} on next Enhance"
+            )
+            branch_badge.style("color: var(--accent); display: inline;")
+        else:
+            state["branch"] = None
+
     # ── helpers ─────────────────────────────────────────────────────
 
     async def _refresh_models_async() -> None:
@@ -208,7 +258,36 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
     def _refresh_models(_):
         ui.timer(0.01, _refresh_models_async, once=True)
 
+    def _on_branch_click(pass_number: int) -> None:
+        """Click handler for ↗ Branch from here buttons on pass cards.
+
+        Stages a branch request that the next ``Enhance`` press will
+        fulfil. The parent is whichever run finished most recently.
+        """
+        parent_id = state.get("last_run_id")
+        if not parent_id:
+            ui.notify(
+                "No completed run yet — finish a run first, then branch.",
+                color="warning",
+            )
+            return
+        state["branch"] = {
+            "parent_run_id": parent_id,
+            "branch_from_pass": pass_number,
+        }
+        branch_badge.set_text(
+            f"Will branch from {parent_id[:8]} @ Pass {pass_number} on next Enhance"
+        )
+        branch_badge.style("color: var(--accent); display: inline;")
+        ui.notify(
+            f"Edit the prompt then click Enhance — will fork from "
+            f"{parent_id[:8]} @ Pass {pass_number}.",
+            color="info",
+        )
+
     def _add_pass_card(**kwargs) -> ui.element:
+        # Wire ↗ Branch from here onto every completed pass 1-3 card.
+        kwargs.setdefault("on_branch", _on_branch_click)
         with state["log_container"]:
             return render_pass_card(**kwargs)
 
@@ -420,6 +499,18 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
         # Pull prior session context (if a session is active in the drawer).
         session_ctx = session_context_for(db_path(), drawer.active_id)
 
+        # Branch state: cleared after this run is wired into PipelineOptions.
+        branch = state.pop("branch", None) if state.get("branch") else None
+        if branch:
+            branch_badge.set_text(
+                f"Branched from {branch['parent_run_id'][:8]} @ "
+                f"Pass {branch['branch_from_pass']}"
+            )
+            branch_badge.style("color: var(--accent); display: inline;")
+        else:
+            branch_badge.set_text("")
+            branch_badge.style("display: none;")
+
         run_btn.disable()
         try:
             result = await run_pipeline(
@@ -433,6 +524,9 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
                     temperature=temp_slider.value,
                     max_tokens_scale=tokens_slider.value,
                     session_id=drawer.active_id,
+                    parent_run_id=(branch or {}).get("parent_run_id"),
+                    branch_from_pass=(branch or {}).get("branch_from_pass"),
+                    branch_db_path=db_path() if branch else None,
                 ),
                 on_event=_on_event,
                 session_context=session_ctx,
@@ -483,6 +577,11 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
         if record is not None:
             runs_module.save(record, db_path(), jsonl_log_path())
             drawer.refresh()  # entry-count for active session may have bumped
+            # Track the most recent run so the ↗ buttons on its pass cards
+            # know which parent to fork from.
+            state["last_run_id"] = record.id
+        elif result.run_id:
+            state["last_run_id"] = result.run_id
 
         final_md.set_content(f"```\n{result.result}\n```")
         with diff_container:

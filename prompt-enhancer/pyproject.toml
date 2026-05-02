@@ -49,6 +49,8 @@ dev = [
     "black>=24.0",
     "mypy>=1.10",
     "playwright>=1.45",
+    "pyinstaller>=6.0",
+    "tomli-w>=1.0",
 ]
 
 [project.scripts]
