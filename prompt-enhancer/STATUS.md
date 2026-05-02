@@ -13,20 +13,25 @@ Enhancement Agent on every diff._
 | 3 — ChatProvider abstraction | ✅ done | LM Studio fully implemented; Ollama/OpenAI/Anthropic stubs with install hints |
 | 4 — typer CLI | ✅ done | `version` `models` `enhance` `history` `ui` `batch` `compare` `export` + interactive disambiguation Q&A + `--skip-clarify` flag |
 | 5 — NiceGUI Desktop Studio | ✅ done | Studio (status strip + tabs + sliders + diff view + 6 components), History (with branch_tree row-detail), Analytics, Compare, Templates (8 seeds), Settings, disambiguation modal |
-| 6 — packaging | scaffolded | PyInstaller spec + Inno Setup script in `packaging/` |
-| 7 — verification | ✅ **LIVE-TESTED** | **41/41 unit tests green** + end-to-end run against gpt-oss-120b via LM Link confirmed below |
+| 6 — packaging | partially built | PyInstaller spec + Inno Setup script in `packaging/`; folder-mode `dist/prompt-enhancer/prompt-enhancer.exe` built 2026-04-28 against Python 3.13. Inno installer (`release/`) not yet compiled. |
+| 7 — verification | ✅ **LIVE-TESTED** | **53/53 unit tests green** (re-run 2026-05-02 against Python 3.12 dev venv) + end-to-end run against gpt-oss-120b via LM Link confirmed below |
 
-## Test status
+## Test status (re-run 2026-05-02, Python 3.12 dev venv)
 
 ```
+tests/test_api_rest.py .....                   5 passed   (REST endpoints)
+tests/test_cli_auto_resume.py ..               2 passed   (CLI resume after disambig)
 tests/test_concurrency.py ...                  3 passed   (the three load-bearing guards)
 tests/test_disambiguation.py ....              4 passed   (pause + resume + per-pass timing + skip-clarify)
+tests/test_discovery.py .....                  5 passed   (provider/model discovery)
 tests/test_migration.py ....                   4 passed   (JSONL → SQLite)
 tests/test_parsing.py ...........................  27 passed
 tests/test_pipeline_smoke.py ...               3 passed   (end-to-end via FakeChatProvider)
                                               ────────────
-                                              41 passed in 11.60s
+                                              53 passed in 12.07s
 ```
+
+**Build-env note:** dev venv was rebuilt fresh on 2026-05-02 against Python 3.12.0 (commit `3a6fa8e`). The previous venv ran on Python 3.13 — the bundled exe in `packaging/dist/` still carries 3.13 `.pyd` files and may need a rebuild before shipping.
 
 ## Live verification — 2026-04-28 against gpt-oss-120b via LM Link
 
@@ -89,6 +94,7 @@ prompt-enhancer/
 │   ├── llm/
 │   │   ├── base.py                      (ChatProvider ABC)
 │   │   ├── lmstudio.py                  (LM Studio + LM Link, idle_timeout=120)
+│   │   ├── lms_link.py                  (LM Link discovery / handshake helper)
 │   │   ├── ollama.py, openai.py, anthropic.py  (stubs)
 │   │   └── registry.py
 │   ├── persistence/
@@ -96,6 +102,9 @@ prompt-enhancer/
 │   │   ├── jsonl_compat.py              (devflow.py byte-for-byte compat)
 │   │   └── safestorage.py
 │   ├── observability/__init__.py
+│   ├── api/                             (NEW — shipped post-STATUS-2026-04-28)
+│   │   ├── rest.py                      (REST endpoints over the pipeline)
+│   │   └── discovery.py                 (provider/model discovery service)
 │   ├── cli/
 │   │   ├── main.py                      (typer entry)
 │   │   └── extras.py                    (batch / compare / export)
@@ -105,16 +114,26 @@ prompt-enhancer/
 │       │   ├── studio.py                (status strip + tabs + sliders + live stream + diff)
 │       │   ├── history.py               (filterable run table)
 │       │   ├── analytics.py             (KPIs + technique pie + task-type bar)
+│       │   ├── compare.py               (side-by-side scorecard — was v0.2, now shipped)
+│       │   ├── templates.py             (CRUD over templates table — was v0.2, now shipped)
 │       │   └── settings.py              (read-only settings inspector)
 │       └── components/
 │           ├── status_strip.py          (9 nodes, color-coded by state)
-│           └── diff_view.py             (difflib HtmlDiff with dark theme)
+│           ├── diff_view.py             (difflib HtmlDiff with dark theme)
+│           ├── branch_tree.py           (parent-run tree visualization)
+│           ├── pass_card.py             (per-pass status + scrubbable timing)
+│           ├── score_chips.py           (Pass-4 quality-score chip row)
+│           └── session_drawer.py        (history + branch navigation drawer)
 ├── tests/
 │   ├── conftest.py                      (FakeChatProvider + event_collector)
 │   ├── test_concurrency.py              (the three load-bearing regression guards)
-│   ├── test_parsing.py
+│   ├── test_parsing.py                  (27 tests — clamp, parsers, disambig Q&A)
 │   ├── test_pipeline_smoke.py
-│   └── test_migration.py
+│   ├── test_migration.py
+│   ├── test_disambiguation.py           (pause + resume + per-pass timing)
+│   ├── test_api_rest.py                 (NEW — REST endpoints)
+│   ├── test_cli_auto_resume.py          (NEW — CLI auto-resume after disambig)
+│   └── test_discovery.py                (NEW — provider/model discovery)
 ├── tools/
 │   ├── methodology_agent.py             (passive Stop-hook reviewer)
 │   ├── migrate_jsonl_to_sqlite.py       (one-shot migration; idempotent)
@@ -151,14 +170,16 @@ python tools\migrate_jsonl_to_sqlite.py --source ..\swarm-agent-dev\agent_pipeli
 
 1. **Live verification** against `gpt-oss-120b-uncensored-hauhaucs-aggressive`
    via LM Link — confirms the three concurrency invariants hold under
-   real remote-GPU latency. (User-driven; needs LM Studio running.)
-2. **Templates page** — CRUD over `templates` table; ship 8 seed templates.
-   Stubbed in schema; UI page deferred to v0.2.
-3. **Compare page** in the UI — CLI `enhancer compare` already works;
-   visual side-by-side scorecard is v0.2.
+   real remote-GPU latency. ✅ Done 2026-04-28 (see runs above).
+2. ~~**Templates page** — CRUD over `templates` table; ship 8 seed templates.~~
+   ✅ **Shipped** in `src/enhancer/ui/pages/templates.py`.
+3. ~~**Compare page** in the UI — visual side-by-side scorecard.~~
+   ✅ **Shipped** in `src/enhancer/ui/pages/compare.py`.
 4. **Branching from any pass** — schema supports it (`parent_run_id` +
    `parent_pass`); UI gesture is v0.2.
-5. **PyInstaller build** — spec + Inno script in `packaging/`; run
+5. **PyInstaller build (Python 3.12)** — spec + Inno script in `packaging/`.
+   Existing `dist/prompt-enhancer.exe` is from 2026-04-28 against Python 3.13;
+   needs rebuild against the 3.12 dev venv before shipping. Run
    `pyinstaller packaging/prompt-enhancer.spec --clean` then `iscc
    packaging/installer.iss` to produce the signed installer.
 6. **TOML settings file** — env vars work today; persisted-from-UI
