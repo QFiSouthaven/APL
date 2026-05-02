@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env files (may contain secrets)
+.env
+.env.local
+
+# Project data
+enhancer.db
+enhancer.db-journal
+enhancer.db-wal
+enhancer.db-shm
+agent_pipeline.log
+enhancer_sessions.json
+model_config.json
+tools/reviews/*.md
+!tools/reviews/.gitkeep
+
+# Packaging — keep the .spec under version control (it IS the build recipe)
+release/

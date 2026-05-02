@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m pytest --collect-only -q)",
+      "PowerShell($src = \"C:\\\\Users\\\\Falki\\\\APL\\\\prompt-enhancer\"; $dst = \"C:\\\\Users\\\\Falki\\\\APL\\\\prompt-enhancer.bak-20260502\"; robocopy $src $dst /E /COPY:DAT /R:1 /W:1 /NFL /NDL /NP; $rc = $LASTEXITCODE; \"ROBOCOPY_EXIT=$rc\"; if \\($rc -lt 8\\) { \"BACKUP_OK\" } else { \"BACKUP_FAILED\" })",
+      "Bash(git init *)",
+      "Bash(git config *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git tag *)"
+    ]
+  }
+}

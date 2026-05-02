@@ -1,0 +1,767 @@
+"""run_pipeline — the 4-pass prompt enhancer (transport-agnostic).
+
+Lifted from ``swarm-agent-dev/src/webui/mods/agent_pipeline.py:874-1664``
+(``_run_pipeline``). Every ``self.emit(ws, ...)`` is now ``await
+on_event(EventType.X, **payload)`` — the only coupling point between
+core and any UI.
+
+**The three concurrency invariants are preserved verbatim. Read
+``docs/EXTRACTION_GOTCHAS.md`` before touching this file.**
+
+1. Pass 1 → Pass 2 are STRICTLY SERIAL. Never ``asyncio.gather``.
+2. Pass 4 is awaited BEFORE Magnitude/SoT begin streaming.
+3. Every ``provider.chat_stream`` call uses ``idle_timeout=120`` (the
+   provider's default). Do not change.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..llm.base import ChatProvider
+from ..persistence.runs import RunRecord
+from .budgeting import (
+    DEFAULT_CHAR_BUDGET,
+    compute_pass_budgets,
+    detect_context_budget,
+    scaled,
+    truncate,
+)
+from .events import EventType, P4_DEFAULTS, PipelineResult
+from .parsing import (
+    coerce_task_type_for_code,
+    count_weakness_fields,
+    parse_disambiguate_questions,
+    parse_persona,
+    parse_scores,
+    parse_task_type,
+    parse_technique,
+)
+from .passes import (
+    DISAMBIGUATE_SYSTEM,
+    PASS_NAMES,
+    PASS1_SYSTEM,
+    PASS2_SYSTEM,
+    PASS4_SYSTEM,
+    TECHNIQUE_GUIDANCE,
+    select_pass3_system,
+)
+from .transforms import (
+    MAGNITUDE_SYSTEM_PROMPT,
+    PERSONA_FALLBACK,
+    PERSONA_SYSTEM,
+    SOT_SYSTEM_PROMPT,
+)
+
+logger = logging.getLogger("enhancer.core.pipeline")
+
+# Threshold for triggering interactive disambiguation.
+DISAMBIGUATE_THRESHOLD = 3
+
+
+# ── input options & resume state ──────────────────────────────────────
+
+@dataclass
+class PipelineOptions:
+    """User-controlled knobs for one pipeline run."""
+
+    scorer_model: str | None = None
+    magnitude_mode: bool = False
+    persona_mode: bool = False
+    sot_mode: bool = False
+    session_id: str | None = None
+    temperature: float = 0.7
+    max_tokens_scale: float = 1.0
+    # Internal — used by disambiguation resume; do not set from UI.
+    resume_state: dict[str, Any] | None = None
+
+
+@dataclass
+class _ResumeState:
+    """Snapshot captured when the pipeline pauses for disambiguation."""
+
+    pass1: str
+    pass2: str
+    task_type: str
+    technique: str
+    session_context: str
+    t0: float
+    t1: float
+    disambiguation_context: str = ""
+
+
+# ── event helpers ────────────────────────────────────────────────────
+
+OnEvent = Callable[..., Awaitable[None]]
+
+
+async def _emit(on_event: OnEvent | None, event: EventType, **kwargs: Any) -> None:
+    """Best-effort event emit — never raises if the consumer disconnects."""
+    if on_event is None:
+        return
+    try:
+        await on_event(event, **kwargs)
+    except Exception as exc:  # noqa: BLE001 — defensive
+        logger.debug("on_event %s suppressed: %s", event.value, exc)
+
+
+# ── pretrial (model recommendation) ──────────────────────────────────
+
+async def run_pretrial(
+    prompt: str,
+    *,
+    provider: ChatProvider,
+    model: str,
+    on_event: OnEvent | None = None,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """Single-shot model recommendation — emits ``PRETRIAL_*`` events."""
+    from .transforms import PRETRIAL_SYSTEM
+    await _emit(on_event, EventType.PRETRIAL_START)
+    try:
+        models = await provider.list_models()
+    except Exception as exc:  # noqa: BLE001
+        await _emit(on_event, EventType.PRETRIAL_ERROR, error=str(exc))
+        return {"error": str(exc)}
+
+    user_msg = (
+        f"Prompt: {prompt}\n\nAvailable models:\n"
+        + "\n".join(f"- {m}" for m in models)
+    )
+    try:
+        text = await provider.chat(
+            messages=[
+                {"role": "system", "content": PRETRIAL_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            model=model, timeout=timeout, temperature=0.4, max_tokens=400,
+        )
+    except Exception as exc:  # noqa: BLE001
+        await _emit(on_event, EventType.PRETRIAL_ERROR, error=str(exc))
+        return {"error": str(exc)}
+
+    out: dict[str, Any] = {"raw": text}
+    for line in text.splitlines():
+        u = line.upper()
+        if u.startswith("CATEGORY:"):
+            out["category"] = line.split(":", 1)[1].strip()
+        elif u.startswith("RECOMMENDED:"):
+            out["recommended"] = line.split(":", 1)[1].strip()
+        elif u.startswith("CONFIDENCE:"):
+            out["confidence"] = line.split(":", 1)[1].strip()
+        elif u.startswith("REASONING:"):
+            out["reasoning"] = line.split(":", 1)[1].strip()
+    out["available_models"] = models
+    await _emit(on_event, EventType.PRETRIAL_RESULT, **out)
+    return out
+
+
+# ── core pipeline ───────────────────────────────────────────────────
+
+async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _run_pipeline
+    prompt: str,
+    *,
+    provider: ChatProvider,
+    model: str,
+    opts: PipelineOptions | None = None,
+    on_event: OnEvent | None = None,
+    session_context: str = "",
+    request_timeout: float = 600.0,
+    idle_timeout: float = 120.0,
+    pending_disambig: dict[str, dict] | None = None,
+) -> PipelineResult:
+    """The 4-pass enhancer.
+
+    Concurrency invariants — these are LOAD-BEARING:
+
+    1. ``pass1 = await ...; pass2 = await ...`` — never gather.
+    2. Pass 4 runs as a background task during Pass 3; it MUST be
+       awaited before Magnitude / SoT begin.
+    3. Every ``provider.chat_stream`` call carries ``idle_timeout``.
+
+    Returns a :class:`PipelineResult` dataclass. Caller is responsible
+    for persisting it via ``persistence.runs.save(...)`` if desired.
+    """
+    opts = opts or PipelineOptions()
+    pending_disambig = pending_disambig if pending_disambig is not None else {}
+    scorer_model = opts.scorer_model or model
+    temperature = opts.temperature
+    max_tokens_scale = opts.max_tokens_scale
+
+    # ── budgets ─────────────────────────────────────────────────────
+    char_budget = DEFAULT_CHAR_BUDGET
+    try:
+        ctx_tokens = await provider.context_window(model)
+        if ctx_tokens:
+            char_budget = int(ctx_tokens * 0.75) * 4
+    except Exception:  # noqa: BLE001
+        char_budget = DEFAULT_CHAR_BUDGET
+    if char_budget == DEFAULT_CHAR_BUDGET:
+        # Fall back to the model-name heuristics in detect_context_budget.
+        # Pass an empty management URL — the function gracefully handles
+        # it and skips the API query.
+        char_budget = detect_context_budget(model, "http://localhost:0")
+
+    budgets = compute_pass_budgets(char_budget)
+
+    # ── Pass 1 + Pass 2: STRICTLY SERIAL ─────────────────────────────
+    # LM Studio (and LM Link → remote GPU) serves one request at a time
+    # per model. asyncio.gather here causes server-side queueing →
+    # httpx ReadTimeout. DO NOT parallelize.
+    # Test: tests/test_concurrency.py::test_pass1_pass2_serial.
+    t0 = time.monotonic()
+    p1_duration_ms = 0
+    p2_duration_ms = 0
+
+    if opts.resume_state is not None:
+        # Disambiguation resume — skip Pass 1/2.
+        rs = opts.resume_state
+        pass1 = rs["pass1"]
+        pass2 = rs["pass2"]
+        task_type = rs["task_type"]
+        technique = rs["technique"]
+        session_context = rs.get("session_context", session_context)
+        disambig_ctx = rs.get("disambiguation_context", "")
+        t1 = rs.get("t1", time.monotonic())
+        t0 = rs.get("t0", t0)
+        # Carry per-pass durations from the original run so the analytics
+        # dashboard sees the same breakdown after resume.
+        p1_duration_ms = rs.get("p1_duration_ms", 0)
+        p2_duration_ms = rs.get("p2_duration_ms", 0)
+        await _emit(on_event, EventType.AGENT_STEP,
+                    step="resume", detail="resumed after clarifications")
+    else:
+        # Pass 1 — Intent Analysis
+        await _emit(on_event, EventType.AGENT_PASS_START,
+                    pass_number=1, pass_name=PASS_NAMES[1], model=model)
+
+        p1_user = _wrap_with_session(
+            session_context, prompt, char_budget // 2, label="prompt",
+        )
+        pass1_chunks: list[str] = []
+        try:
+            async for tok in provider.chat_stream(
+                messages=[
+                    {"role": "system", "content": PASS1_SYSTEM},
+                    {"role": "user", "content": truncate(p1_user, char_budget, "p1")},
+                ],
+                model=model, temperature=temperature,
+                max_tokens=scaled(budgets.analysis, max_tokens_scale),
+                timeout=request_timeout, idle_timeout=idle_timeout,
+            ):
+                pass1_chunks.append(tok)
+                await _emit(on_event, EventType.AGENT_PASS_CHUNK,
+                            pass_number=1, token=tok)
+        except Exception as exc:  # noqa: BLE001
+            await _emit(on_event, EventType.AGENT_ERROR,
+                        step="pass1", error=str(exc))
+            raise
+        pass1 = "".join(pass1_chunks)
+        t_after_p1 = time.monotonic()
+        p1_duration_ms = int((t_after_p1 - t0) * 1000)
+
+        # Pass 2 — Weakness Detection
+        await _emit(on_event, EventType.AGENT_PASS_START,
+                    pass_number=2, pass_name=PASS_NAMES[2], model=model)
+
+        pass2_chunks: list[str] = []
+        try:
+            async for tok in provider.chat_stream(
+                messages=[
+                    {"role": "system", "content": PASS2_SYSTEM},
+                    {"role": "user", "content": truncate(prompt, char_budget, "p2")},
+                ],
+                model=model, temperature=temperature,
+                max_tokens=scaled(budgets.analysis, max_tokens_scale),
+                timeout=request_timeout, idle_timeout=idle_timeout,
+            ):
+                pass2_chunks.append(tok)
+                await _emit(on_event, EventType.AGENT_PASS_CHUNK,
+                            pass_number=2, token=tok)
+        except Exception as exc:  # noqa: BLE001
+            await _emit(on_event, EventType.AGENT_ERROR,
+                        step="pass2", error=str(exc))
+            raise
+        pass2 = "".join(pass2_chunks)
+
+        t1 = time.monotonic()
+        p2_duration_ms = int((t1 - t_after_p1) * 1000)
+        task_type = coerce_task_type_for_code(parse_task_type(pass1), prompt)
+        technique = parse_technique(pass2)
+        disambig_ctx = ""
+
+        await _emit(on_event, EventType.AGENT_PASS_RESULT,
+                    pass_number=1, pass_name=PASS_NAMES[1],
+                    content=pass1, model=model,
+                    duration_ms=p1_duration_ms,
+                    task_type=task_type)
+        await _emit(on_event, EventType.AGENT_PASS_RESULT,
+                    pass_number=2, pass_name=PASS_NAMES[2],
+                    content=pass2, model=model,
+                    duration_ms=p2_duration_ms,
+                    technique=technique)
+
+        # ── Interactive disambiguation ──────────────────────────────
+        if count_weakness_fields(pass2) >= DISAMBIGUATE_THRESHOLD:
+            disambig_id = await _maybe_disambiguate(
+                prompt, pass1, pass2,
+                provider=provider, model=model,
+                temperature=temperature, max_tokens_scale=max_tokens_scale,
+                request_timeout=request_timeout,
+                opts=opts, on_event=on_event,
+                task_type=task_type, technique=technique,
+                session_context=session_context, t0=t0, t1=t1,
+                p1_duration_ms=p1_duration_ms, p2_duration_ms=p2_duration_ms,
+                pending_disambig=pending_disambig,
+            )
+            if disambig_id is not None:
+                # Pipeline pauses. Caller resumes via opts.resume_state.
+                # Return a sentinel result — the actual result will come
+                # from the resumed run.
+                return _empty_result(
+                    prompt=prompt, model=model, scorer_model=scorer_model,
+                    technique=technique, task_type=task_type,
+                )
+
+    t2 = t1  # Pass 1/2 finished at the same instant in our timing model.
+
+    # ── Persona detection (optional) ────────────────────────────────
+    persona_text: str | None = None
+    persona_time_ms = 0
+    pass3_system = select_pass3_system(task_type)
+
+    if opts.persona_mode:
+        await _emit(on_event, EventType.PERSONA_START, model=model)
+        tp0 = time.monotonic()
+        try:
+            persona_user = (
+                f"User prompt:\n{truncate(prompt, char_budget // 4, 'persona-prompt')}\n\n"
+                f"Intent analysis:\n{truncate(pass1, char_budget // 4, 'persona-pass1')}\n\n"
+                f"Weakness analysis:\n{truncate(pass2, char_budget // 4, 'persona-pass2')}"
+            )
+            # Streams instead of one-shot chat — same rationale as Pass 4:
+            # reasoning-token models (gpt-oss family) reliably return EMPTY
+            # content from non-streaming /chat/completions because LM Studio
+            # post-filters the reasoning block. Streaming SSE bypasses that
+            # filter. See knowledge/lm-studio-models.md §1.
+            persona_chunks: list[str] = []
+            async for tok in provider.chat_stream(
+                messages=[
+                    {"role": "system", "content": PERSONA_SYSTEM},
+                    {"role": "user", "content": persona_user},
+                ],
+                model=model, temperature=temperature,
+                max_tokens=scaled(budgets.persona, max_tokens_scale),
+                timeout=request_timeout, idle_timeout=idle_timeout,
+            ):
+                persona_chunks.append(tok)
+            raw = "".join(persona_chunks)
+            tp1 = time.monotonic()
+            parsed = parse_persona(raw) or PERSONA_FALLBACK
+            persona_text = parsed
+            persona_time_ms = int((tp1 - tp0) * 1000)
+            t2_effective = tp1
+            await _emit(on_event, EventType.PERSONA_RESULT,
+                        persona=parsed, raw_output=raw,
+                        duration_ms=persona_time_ms, model=model)
+            pass3_system = (
+                f"You are: {parsed}\n\n{pass3_system}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Persona detection failed, falling back: %s", exc)
+            persona_text = PERSONA_FALLBACK
+            t2_effective = t2
+    else:
+        t2_effective = t2
+
+    # ── Pass 3 — Task-aware Rewrite (streamed) ──────────────────────
+    await _emit(on_event, EventType.AGENT_PASS_START,
+                pass_number=3, pass_name=PASS_NAMES[3], model=model)
+
+    technique_guidance = TECHNIQUE_GUIDANCE.get(technique, "")
+    pass3_user_parts = [
+        f"Original prompt:\n{truncate(prompt, char_budget // 3, 'p3-prompt')}\n",
+        f"Intent analysis:\n{truncate(pass1, char_budget // 4, 'p3-pass1')}\n",
+        f"Weakness analysis:\n{truncate(pass2, char_budget // 4, 'p3-pass2')}\n",
+    ]
+    if technique_guidance:
+        pass3_user_parts.append(technique_guidance + "\n")
+    if disambig_ctx:
+        pass3_user_parts.append(disambig_ctx + "\n")
+    if session_context:
+        pass3_user_parts.append(
+            "[SESSION CONTEXT]\n"
+            + truncate(session_context, char_budget // 2, "p3-session")
+            + "\n[END SESSION CONTEXT]\n"
+        )
+
+    pass3_user = "\n".join(pass3_user_parts)
+
+    pass3_partial = False
+    enhanced_chunks: list[str] = []
+    try:
+        async for tok in provider.chat_stream(
+            messages=[
+                {"role": "system", "content": pass3_system},
+                {"role": "user", "content": pass3_user},
+            ],
+            model=model, temperature=temperature,
+            max_tokens=scaled(budgets.rewrite, max_tokens_scale),
+            timeout=request_timeout, idle_timeout=idle_timeout,
+        ):
+            enhanced_chunks.append(tok)
+            await _emit(on_event, EventType.AGENT_PASS_CHUNK,
+                        pass_number=3, token=tok)
+    except Exception as exc:  # noqa: BLE001
+        pass3_partial = True
+        if not enhanced_chunks:
+            # Fall back to original prompt — Pass 4 will be skipped because
+            # comparing prompt-vs-prompt wastes a call. Documented in
+            # docs/EXTRACTION_GOTCHAS.md §9.
+            enhanced_chunks.append(prompt)
+        await _emit(on_event, EventType.AGENT_ERROR,
+                    step="pass3", error=str(exc))
+
+    enhanced = "".join(enhanced_chunks)
+    t3 = time.monotonic()
+    await _emit(on_event, EventType.AGENT_PASS_RESULT,
+                pass_number=3, pass_name=PASS_NAMES[3],
+                content=enhanced, model=model,
+                duration_ms=int((t3 - t2_effective) * 1000))
+
+    # ── Pass 4 — Quality Scoring (background task) ──────────────────
+    pass4_task: asyncio.Task | None = None
+    pass4_text = ""
+    scores: dict[str, int] = dict(P4_DEFAULTS)
+    scores_fallback = False
+
+    if pass3_partial and enhanced == prompt:
+        # No meaningful enhancement — skip scoring entirely.
+        scores_fallback = True
+    else:
+        async def _run_pass4_bg() -> tuple[str, dict[str, int], float]:
+            # Pass 4 streams instead of one-shot chat. Reasoning-token
+            # models (gpt-oss family) reliably return EMPTY visible
+            # content from non-streaming `/chat/completions` because LM
+            # Studio post-filters the reasoning block. Streaming SSE
+            # bypasses that filter and the four score lines arrive
+            # intact. See knowledge/lm-studio-models.md §1.
+            t4_start = time.monotonic()
+            p4_user = (
+                "Original:\n"
+                f"{truncate(prompt, char_budget // 3, 'p4-orig')}\n\n"
+                "Enhanced:\n"
+                f"{truncate(enhanced, char_budget // 3, 'p4-enh')}"
+            )
+            chunks: list[str] = []
+            async for tok in provider.chat_stream(
+                messages=[
+                    {"role": "system", "content": PASS4_SYSTEM},
+                    {"role": "user", "content": p4_user},
+                ],
+                model=scorer_model, temperature=temperature,
+                max_tokens=scaled(budgets.score, max_tokens_scale),
+                timeout=request_timeout, idle_timeout=idle_timeout,
+            ):
+                chunks.append(tok)
+            raw = "".join(chunks)
+            return raw, parse_scores(raw), time.monotonic() - t4_start
+
+        pass4_task = asyncio.create_task(_run_pass4_bg())
+
+    # ── AWAIT PASS 4 BEFORE MAGNITUDE / SoT ─────────────────────────
+    # LM Studio serves one request at a time per model. Pass 4 + a
+    # streaming Magnitude/SoT in parallel = server-side queueing →
+    # ReadTimeout. DO NOT change the ordering here.
+    # Test: tests/test_concurrency.py::test_pass4_awaited_before_magnitude.
+    t4_dur_ms = 0
+    if pass4_task is not None:
+        try:
+            pass4_text, scores, p4_dur = await pass4_task
+            t4_dur_ms = int(p4_dur * 1000)
+            scores_fallback = not bool(pass4_text)
+        except Exception as exc:  # noqa: BLE001
+            scores_fallback = True
+            await _emit(on_event, EventType.AGENT_ERROR,
+                        step="pass4", error=str(exc))
+        finally:
+            pass4_task = None  # mark as already consumed — load-bearing!
+
+    if not scores_fallback:
+        await _emit(on_event, EventType.AGENT_PASS_RESULT,
+                    pass_number=4, pass_name=PASS_NAMES[4],
+                    content=pass4_text, model=scorer_model,
+                    duration_ms=t4_dur_ms, scores=scores)
+
+    # ── Self-correction retry (if improvement is low) ───────────────
+    if (
+        not scores_fallback
+        and not pass3_partial
+        and opts.resume_state is None
+        and scores.get("improvement", 0) < 20
+    ):
+        await _emit(on_event, EventType.AGENT_STEP,
+                    step="self_correction", detail="improvement<20, retrying")
+        retry_user = (
+            f"Critique of previous attempt:\n{pass4_text}\n\n"
+            f"Original prompt:\n{prompt}\n\n"
+            f"Previous enhanced prompt:\n{enhanced}\n\n"
+            "Rewrite the prompt addressing the critique. "
+            "Output ONLY the rewritten prompt."
+        )
+        retry_chunks: list[str] = []
+        try:
+            async for tok in provider.chat_stream(
+                messages=[
+                    {"role": "system", "content": pass3_system},
+                    {"role": "user", "content": retry_user},
+                ],
+                model=model, temperature=temperature,
+                max_tokens=scaled(budgets.rewrite, max_tokens_scale),
+                timeout=request_timeout, idle_timeout=idle_timeout,
+            ):
+                retry_chunks.append(tok)
+                await _emit(on_event, EventType.AGENT_PASS_CHUNK,
+                            pass_number=3, token=tok)
+            if retry_chunks:
+                enhanced = "".join(retry_chunks)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Self-correction retry failed: %s", exc)
+
+    # ── Magnitude transform (after Pass 4, optional) ────────────────
+    magnitude_output = ""
+    if opts.magnitude_mode:
+        await _emit(on_event, EventType.MAGNITUDE_START)
+        mag_chunks: list[str] = []
+        try:
+            async for tok in provider.chat_stream(
+                messages=[
+                    {"role": "system", "content": MAGNITUDE_SYSTEM_PROMPT},
+                    {"role": "user", "content": truncate(enhanced, char_budget, "mag")},
+                ],
+                model=model, temperature=temperature,
+                max_tokens=scaled(budgets.magnitude, max_tokens_scale),
+                timeout=request_timeout, idle_timeout=idle_timeout,
+            ):
+                mag_chunks.append(tok)
+                await _emit(on_event, EventType.MAGNITUDE_CHUNK, token=tok)
+        except Exception as exc:  # noqa: BLE001
+            await _emit(on_event, EventType.MAGNITUDE_ERROR, error=str(exc))
+        magnitude_output = "".join(mag_chunks)
+        await _emit(on_event, EventType.MAGNITUDE_DONE, content=magnitude_output)
+
+    # ── Skeleton-of-Thought (after Pass 4, optional) ────────────────
+    sot_output = ""
+    if opts.sot_mode:
+        await _emit(on_event, EventType.SOT_START)
+        sot_chunks: list[str] = []
+        try:
+            async for tok in provider.chat_stream(
+                messages=[
+                    {"role": "system", "content": SOT_SYSTEM_PROMPT},
+                    {"role": "user", "content": truncate(enhanced, char_budget, "sot")},
+                ],
+                model=model, temperature=temperature,
+                max_tokens=scaled(budgets.sot, max_tokens_scale),
+                timeout=request_timeout, idle_timeout=idle_timeout,
+            ):
+                sot_chunks.append(tok)
+                await _emit(on_event, EventType.SOT_CHUNK, token=tok)
+        except Exception as exc:  # noqa: BLE001
+            await _emit(on_event, EventType.SOT_ERROR, error=str(exc))
+        sot_output = "".join(sot_chunks)
+        await _emit(on_event, EventType.SOT_DONE, content=sot_output)
+
+    # ── Summary + Done ──────────────────────────────────────────────
+    pass_times_ms = {
+        "pass1": p1_duration_ms,
+        "pass2": p2_duration_ms,
+        "pass3": int((t3 - t2_effective) * 1000),
+        "pass4": t4_dur_ms,
+    }
+    if persona_time_ms:
+        pass_times_ms["persona"] = persona_time_ms
+
+    await _emit(on_event, EventType.AGENT_PIPELINE_SUMMARY,
+                total_duration_ms=int((time.monotonic() - t0) * 1000),
+                pass_times_ms=pass_times_ms,
+                technique=technique, task_type=task_type,
+                scores=scores, model=model, scorer_model=scorer_model,
+                persona=persona_text)
+
+    await _emit(on_event, EventType.ENHANCEMENT_SCORE,
+                scores=scores, scores_fallback=scores_fallback,
+                pass_times_ms=pass_times_ms, scorer_model=scorer_model)
+
+    # Build the final record so callers can persist it.
+    record = RunRecord(
+        prompt=prompt,
+        enhanced_prompt=enhanced,
+        task_type=task_type,
+        technique=technique,
+        persona=persona_text,
+        pass1_output=pass1,
+        pass2_output=pass2,
+        pass4_output=pass4_text,
+        magnitude_output=magnitude_output,
+        sot_output=sot_output,
+        pass_times_ms=pass_times_ms,
+        model=model,
+        scorer_model=scorer_model,
+        temperature=temperature,
+        max_tokens_scale=max_tokens_scale,
+        scores=scores,
+        scores_fallback=scores_fallback,
+        pass3_partial=pass3_partial,
+        session_id=opts.session_id,
+    )
+
+    await _emit(on_event, EventType.AGENT_DONE,
+                result=enhanced, technique=technique, task_type=task_type,
+                scores=scores, scores_fallback=scores_fallback,
+                run_id=record.id)
+
+    return PipelineResult(
+        result=enhanced, technique=technique, task_type=task_type,
+        scores=scores, scores_fallback=scores_fallback,
+        pass3_partial=pass3_partial, persona=persona_text,
+        magnitude_output=magnitude_output, sot_output=sot_output,
+        pass_times_ms=pass_times_ms, model=model,
+        scorer_model=scorer_model, run_id=record.id,
+        extras={"_record": record},
+    )
+
+
+# ── helpers ─────────────────────────────────────────────────────────
+
+def _wrap_with_session(session_context: str, prompt: str,
+                       budget: int, label: str) -> str:
+    """Wrap prompt in [SESSION CONTEXT] markers if session_context is non-empty."""
+    if not session_context:
+        return prompt
+    truncated = truncate(session_context, budget, label)
+    return (
+        "[SESSION CONTEXT]\n"
+        f"{truncated}\n"
+        "[END SESSION CONTEXT]\n\n"
+        "[CURRENT REQUEST]\n"
+        f"{prompt}"
+    )
+
+
+def _empty_result(*, prompt: str, model: str, scorer_model: str,
+                  technique: str, task_type: str) -> PipelineResult:
+    """Sentinel returned when the pipeline pauses for disambiguation."""
+    return PipelineResult(
+        result="",                       # caller knows to wait for resume
+        technique=technique, task_type=task_type,
+        scores=dict(P4_DEFAULTS), scores_fallback=True,
+        pass3_partial=False, persona=None,
+        magnitude_output="", sot_output="",
+        pass_times_ms={}, model=model, scorer_model=scorer_model,
+        run_id="", extras={"paused": True},
+    )
+
+
+def build_resume_state(
+    snapshot: dict[str, Any],
+    answers: dict[str, str],
+) -> dict[str, Any]:
+    """Construct a resume_state dict from a pending_disambig snapshot.
+
+    ``snapshot`` is the entry stored in the ``pending_disambig`` dict
+    when the pipeline paused (see ``_maybe_disambiguate``). ``answers``
+    maps question ids (``Q1``, ``Q2``, …) to the user's answer text.
+
+    Pass the returned dict as ``opts.resume_state`` on the next
+    ``run_pipeline`` call to skip Pass 1/2 and go straight to Pass 3
+    with the clarifications injected into the user message.
+    """
+    questions_by_id = snapshot.get("questions", {})
+    answer_lines = [
+        f"- {questions_by_id.get(q_id, q_id)}: {ans}"
+        for q_id, ans in answers.items()
+    ]
+    answer_context = (
+        "[USER CLARIFICATIONS]\n"
+        + "\n".join(answer_lines)
+        + "\n[END USER CLARIFICATIONS]"
+    ) if answer_lines else ""
+    return {
+        "pass1": snapshot["pass1"],
+        "pass2": snapshot["pass2"],
+        "task_type": snapshot["task_type"],
+        "technique": snapshot["technique"],
+        "session_context": snapshot.get("session_context", ""),
+        "t0": snapshot["t0"],
+        "t1": snapshot["t1"],
+        "p1_duration_ms": snapshot.get("p1_duration_ms", 0),
+        "p2_duration_ms": snapshot.get("p2_duration_ms", 0),
+        "disambiguation_context": answer_context,
+    }
+
+
+async def _maybe_disambiguate(
+    prompt: str, pass1: str, pass2: str,
+    *,
+    provider: ChatProvider, model: str,
+    temperature: float, max_tokens_scale: float, request_timeout: float,
+    opts: PipelineOptions, on_event: OnEvent | None,
+    task_type: str, technique: str, session_context: str,
+    t0: float, t1: float,
+    p1_duration_ms: int = 0, p2_duration_ms: int = 0,
+    pending_disambig: dict[str, dict],
+) -> str | None:
+    """Generate clarification questions; pause if any are produced.
+
+    Returns the ``disambig_id`` if the pipeline paused, else ``None`` so
+    the caller proceeds to Pass 3.
+    """
+    import secrets
+
+    user_msg = (
+        f"Original prompt:\n{prompt}\n\n"
+        f"Weakness analysis:\n{pass2}"
+    )
+    try:
+        raw = await provider.chat(
+            messages=[
+                {"role": "system", "content": DISAMBIGUATE_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            model=model, temperature=temperature,
+            max_tokens=scaled(400, max_tokens_scale),
+            timeout=request_timeout,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Disambiguation generation failed, skipping: %s", exc)
+        return None
+
+    questions = parse_disambiguate_questions(raw)
+    if not questions:
+        return None
+
+    disambig_id = secrets.token_hex(8)
+    pending_disambig[disambig_id] = {
+        "prompt": prompt,
+        "scorer_model": opts.scorer_model,
+        "magnitude_mode": opts.magnitude_mode,
+        "persona_mode": opts.persona_mode,
+        "sot_mode": opts.sot_mode,
+        "session_id": opts.session_id,
+        "pass1": pass1, "pass2": pass2,
+        "task_type": task_type, "technique": technique,
+        "session_context": session_context,
+        "t0": t0, "t1": t1,
+        "p1_duration_ms": p1_duration_ms,
+        "p2_duration_ms": p2_duration_ms,
+        "questions": {f"Q{i + 1}": q["question"] for i, q in enumerate(questions)},
+    }
+    await _emit(on_event, EventType.AGENT_DISAMBIGUATE,
+                disambig_id=disambig_id, questions=questions)
+    return disambig_id
