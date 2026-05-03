@@ -13,22 +13,24 @@ Enhancement Agent on every diff._
 | 3 — ChatProvider abstraction | ✅ done | LM Studio fully implemented; Ollama/OpenAI/Anthropic stubs with install hints |
 | 4 — typer CLI | ✅ done | `version` `models` `enhance` `history` `ui` `batch` `compare` `export` + interactive disambiguation Q&A + `--skip-clarify` flag |
 | 5 — NiceGUI Desktop Studio | ✅ done | Studio (status strip + tabs + sliders + diff view + 6 components), History (with branch_tree row-detail), Analytics, Compare, Templates (8 seeds), Settings, disambiguation modal |
-| 6 — packaging | partially built | PyInstaller spec + Inno Setup script in `packaging/`; folder-mode `dist/prompt-enhancer/prompt-enhancer.exe` built 2026-04-28 against Python 3.13. Inno installer (`release/`) not yet compiled. |
-| 7 — verification | ✅ **LIVE-TESTED** | **53/53 unit tests green** (re-run 2026-05-02 against Python 3.12 dev venv) + end-to-end run against gpt-oss-120b via LM Link confirmed below |
+| 6 — packaging | partially built | PyInstaller spec + Inno Setup script in `packaging/`; folder-mode `dist/prompt-enhancer/prompt-enhancer.exe` rebuilt 2026-05-02 against Python 3.12 (240 MB, smoke=HTTP 200). Inno installer (`release/`) not yet compiled — `iscc` not on PATH. |
+| 7 — verification | ✅ **LIVE-TESTED** | **59/59 unit tests green** (re-run 2026-05-02 after merging items #4 + #6) + end-to-end run against gpt-oss-120b via LM Link confirmed below |
 
 ## Test status (re-run 2026-05-02, Python 3.12 dev venv)
 
 ```
 tests/test_api_rest.py .....                   5 passed   (REST endpoints)
+tests/test_branching.py ...                    3 passed   (branch-from-pass — item #4)
 tests/test_cli_auto_resume.py ..               2 passed   (CLI resume after disambig)
 tests/test_concurrency.py ...                  3 passed   (the three load-bearing guards)
+tests/test_config_toml.py ...                  3 passed   (TOML settings — item #6)
 tests/test_disambiguation.py ....              4 passed   (pause + resume + per-pass timing + skip-clarify)
 tests/test_discovery.py .....                  5 passed   (provider/model discovery)
 tests/test_migration.py ....                   4 passed   (JSONL → SQLite)
 tests/test_parsing.py ...........................  27 passed
 tests/test_pipeline_smoke.py ...               3 passed   (end-to-end via FakeChatProvider)
                                               ────────────
-                                              53 passed in 12.07s
+                                              59 passed in 12.10s
 ```
 
 **Build-env note:** dev venv was rebuilt fresh on 2026-05-02 against Python 3.12.0 (commit `3a6fa8e`). The previous venv ran on Python 3.13 — the bundled exe in `packaging/dist/` still carries 3.13 `.pyd` files and may need a rebuild before shipping.
@@ -175,15 +177,26 @@ python tools\migrate_jsonl_to_sqlite.py --source ..\swarm-agent-dev\agent_pipeli
    ✅ **Shipped** in `src/enhancer/ui/pages/templates.py`.
 3. ~~**Compare page** in the UI — visual side-by-side scorecard.~~
    ✅ **Shipped** in `src/enhancer/ui/pages/compare.py`.
-4. **Branching from any pass** — schema supports it (`parent_run_id` +
-   `parent_pass`); UI gesture is v0.2.
-5. **PyInstaller build (Python 3.12)** — spec + Inno script in `packaging/`.
-   Existing `dist/prompt-enhancer.exe` is from 2026-04-28 against Python 3.13;
-   needs rebuild against the 3.12 dev venv before shipping. Run
-   `pyinstaller packaging/prompt-enhancer.spec --clean` then `iscc
-   packaging/installer.iss` to produce the signed installer.
-6. **TOML settings file** — env vars work today; persisted-from-UI
-   settings land in v0.2.
+4. ~~**Branching from any pass** — schema supports it (`parent_run_id` +
+   `parent_pass`); UI gesture is v0.2.~~
+   ✅ **Shipped** 2026-05-02 (commit `f703012`). `PipelineOptions.branch_from_pass`
+   + `parent_run_id` reuse parent's pass1/pass2/pass3 outputs; "↗ Branch from
+   here" button on completed `pass_card`s; status-strip badge while branch
+   streams; History row-detail Pass-1/2/3 buttons. Re-uses `AGENT_STEP
+   step="branch_start"` (no EventType v2 bump). Tests: `test_branching.py` (3).
+5. **PyInstaller build (Python 3.12)** — PyInstaller half done 2026-05-02:
+   `packaging/dist/prompt-enhancer/` rebuilt against Python 3.12 (240 MB,
+   smoke=HTTP 200). Inno Setup compile of `release/prompt-enhancer-setup.exe`
+   still pending — `iscc` not on PATH. Install Inno Setup 6+
+   (https://jrsoftware.org/isdl.php), then `iscc packaging/installer.iss`.
+6. ~~**TOML settings file** — env vars work today; persisted-from-UI
+   settings land in v0.2.~~
+   ✅ **Shipped** 2026-05-02 (commit `f703012`). `config.load()` layers
+   defaults < TOML < env; `config.save_settings()` writes
+   `%APPDATA%\prompt-enhancer\settings.toml` with atomic rename + `.bak`
+   recovery; Settings page exposes 8 editable + 5 read-only keys; `POST
+   /api/settings` validates types against the `Settings` dataclass. Tests:
+   `test_config_toml.py` (3).
 
 ## Methodology Enhancement Agent — operating contract
 
