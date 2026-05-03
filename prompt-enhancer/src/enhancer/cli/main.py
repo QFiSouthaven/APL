@@ -34,6 +34,7 @@ from .. import __version__
 from ..config import db_path, jsonl_log_path, load
 from ..core.events import EventType
 from ..core.pipeline import PipelineOptions, build_resume_state, run_pipeline
+from ..llm.lms_discovery import ModelLoadUnavailableError, ensure_model_loaded
 from ..llm.registry import get_provider
 from ..persistence import runs as runs_module
 
@@ -95,7 +96,20 @@ def enhance(
     settings = load()
     provider = get_provider(settings)
     chosen_model = model or settings.default_model
-    if not chosen_model:
+
+    # Ensure LM Studio has a chat model loaded — auto-load via `lms` CLI
+    # if necessary. Surfaces a clear error instead of silent empty
+    # completions when the user forgot to load one. Only applied for
+    # the LM Studio provider (the only backend with a load CLI today).
+    if getattr(provider, "name", "") == "lmstudio":
+        try:
+            chosen_model = asyncio.run(
+                ensure_model_loaded(preferred=chosen_model or None)
+            )
+        except ModelLoadUnavailableError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=2) from None
+    elif not chosen_model:
         async def _first() -> str:
             mods = await provider.list_models()
             return mods[0] if mods else ""

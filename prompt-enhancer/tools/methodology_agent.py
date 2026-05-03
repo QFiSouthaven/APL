@@ -21,6 +21,7 @@ ChatProvider abstraction integrity.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import json
 import os
@@ -34,7 +35,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 REVIEWS_DIR = REPO_ROOT / "tools" / "reviews"
 REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Add the src/ layout to sys.path so `from enhancer.llm.lms_discovery import ...`
+# works even if the script is invoked outside an editable install.
+_SRC = REPO_ROOT / "src"
+if _SRC.exists() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 LMS_BASE_URL = os.environ.get("ENHANCER_LMS_BASE_URL", "http://127.0.0.1:1234/v1")
+LMS_MGMT_URL = LMS_BASE_URL[:-3] if LMS_BASE_URL.endswith("/v1") else LMS_BASE_URL
 TIMEOUT = float(os.environ.get("ENHANCER_METHODOLOGY_TIMEOUT", "60"))
 ENABLED = os.environ.get("ENHANCER_METHODOLOGY_AGENT_ENABLED", "1") not in {"0", "false", "no"}
 
@@ -153,19 +161,47 @@ def _ask_lms(diff: str) -> str:
         return f"_methodology agent unavailable: {exc!s}_"
 
 
+def _ensure_loaded_or_explain() -> str:
+    """Best-effort: ensure a chat model is loaded before the LM call.
+
+    Returns the empty string on success, or a one-paragraph error message
+    suitable for embedding in the review file when nothing can be loaded.
+    Never raises — methodology agent must remain non-failing.
+    """
+    try:
+        from enhancer.llm.lms_discovery import (
+            ModelLoadUnavailableError,
+            ensure_model_loaded,
+        )
+    except ImportError as exc:
+        # lms_discovery not importable (e.g. running outside the venv).
+        # Skip the pre-check entirely; let _ask_lms do its thing.
+        return f"_lms_discovery unavailable: {exc!s}_\n\n"
+
+    preferred = os.environ.get("ENHANCER_METHODOLOGY_MODEL") or None
+    try:
+        asyncio.run(ensure_model_loaded(preferred=preferred, base_url=LMS_MGMT_URL))
+        return ""
+    except ModelLoadUnavailableError as exc:
+        return f"_no chat model loaded; auto-load failed: {exc!s}_\n\n"
+    except Exception as exc:  # pragma: no cover — never fail Stop-hook
+        return f"_ensure_model_loaded raised: {exc!s}_\n\n"
+
+
 def main() -> int:
     if not ENABLED:
         return 0
     diff = _get_diff()
     if not diff.strip():
         return 0
+    preflight = _ensure_loaded_or_explain()
     review = _ask_lms(diff)
     ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     out = REVIEWS_DIR / f"method-{ts}.md"
     out.write_text(
         f"# Methodology review — {ts}\n\n"
         f"_passive agent; senior-dev one-step-ahead/behind on the latest diff_\n\n"
-        f"{review}\n",
+        f"{preflight}{review}\n",
         encoding="utf-8",
     )
     return 0

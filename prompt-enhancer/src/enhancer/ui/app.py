@@ -49,6 +49,28 @@ body { background: var(--bg); color: var(--text); }
 """
 
 
+def _preflight_lms_warning() -> None:
+    """Quick non-blocking check; print a stdout warning if LM Studio
+    is unreachable or has no chat model loaded. Never raises."""
+    import asyncio
+
+    from ..llm.lms_discovery import discover_chat_models
+
+    try:
+        models = asyncio.run(discover_chat_models(timeout=2.0))
+    except Exception:
+        return  # never block startup
+    if not models:
+        print("[startup] LM Studio is unreachable — start LM Studio for inference.")
+        return
+    if not any(m.is_loaded for m in models):
+        print(
+            "[startup] LM Studio is up but no chat model is loaded.\n"
+            "[startup]   Open LM Studio → load any chat model, "
+            "or run `lms load <id>`."
+        )
+
+
 def run() -> None:
     """Boot NiceGUI on the configured host:port and open the browser."""
     from nicegui import app as nicegui_app, ui
@@ -62,6 +84,7 @@ def run() -> None:
     from .pages import studio as studio_page
     from .pages import templates as templates_page
 
+    _preflight_lms_warning()
     s = load()
 
     # Mount the inter-product REST API onto NiceGUI's FastAPI app so

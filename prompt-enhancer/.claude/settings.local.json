@@ -20,7 +20,16 @@
       "Read(//c/Users/Falki/.claude//**)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" --max-time 3 http://127.0.0.1:1234/v1/models)",
       "Bash(.venv/Scripts/python.exe tools/methodology_agent.py)",
-      "Bash(echo \"---EXITCODE=$?---\")"
+      "Bash(echo \"---EXITCODE=$?---\")",
+      "Bash(curl -s --max-time 3 http://127.0.0.1:1234/api/v0/models)",
+      "Bash(lms --version)",
+      "Read(//c/Users/Falki/.lmstudio/bin/**)",
+      "Read(//c/Users/Falki/AppData/Local/LM-Studio/**)",
+      "Read(//c/Program Files/LM Studio/**)",
+      "Read(//c/Users/Falki/**)",
+      "Bash(curl -sS -X POST --max-time 3 -H \"Content-Type: application/json\" -d '{\"model\":\"hermes-3-llama-3.1-8b\"}' http://127.0.0.1:1234/api/v0/models/load)",
+      "Bash(curl -sS -o /dev/null -w \"%{http_code}\" --max-time 3 http://127.0.0.1:1234/api/v0/models/load -X POST -H \"Content-Type: application/json\" -d '{\"model\":\"hermes-3-llama-3.1-8b\"}')",
+      "Bash(\"/c/Users/Falki/.lmstudio/bin/lms.exe\" --help)"
     ]
   }
 }
