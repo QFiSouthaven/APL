@@ -13,7 +13,7 @@ Enhancement Agent on every diff._
 | 3 — ChatProvider abstraction | ✅ done | LM Studio fully implemented; Ollama/OpenAI/Anthropic stubs with install hints |
 | 4 — typer CLI | ✅ done | `version` `models` `enhance` `history` `ui` `batch` `compare` `export` + interactive disambiguation Q&A + `--skip-clarify` flag |
 | 5 — NiceGUI Desktop Studio | ✅ done | Studio (status strip + tabs + sliders + diff view + 6 components), History (with branch_tree row-detail), Analytics, Compare, Templates (8 seeds), Settings, disambiguation modal |
-| 6 — packaging | ✅ done | `dist/prompt-enhancer/prompt-enhancer.exe` rebuilt 2026-05-02 against Python 3.12 (240 MB, smoke=HTTP 200). Inno installer compiled to `release/prompt-enhancer-setup.exe` (74 MB, SHA256 `890d571e9b5e700692e9e1facdf630eb65dad913bc6cb58ad5d25de4658fe5ba`) using Inno Setup 6.7.1. |
+| 6 — packaging | ✅ done | `dist/prompt-enhancer/prompt-enhancer.exe` rebuilt 2026-05-03 against Python 3.12 (117 MB, smoke=HTTP 200). Inno installer compiled to `release/prompt-enhancer-setup.exe` (38 MB, SHA256 `96a6ff106bc235f5ec3d678d1f00f1db834e510cfd54a0b86460db44e7d86198`) using Inno Setup 6.7.1. Includes the `tomli-w` runtime-dep fix from commit `20112ff`. |
 | 7 — verification | ✅ **LIVE-TESTED** | **59/59 unit tests green** (re-run 2026-05-02 after merging items #4 + #6) + end-to-end run against gpt-oss-120b via LM Link confirmed below |
 
 ## Test status (re-run 2026-05-02, Python 3.12 dev venv)
