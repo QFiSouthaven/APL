@@ -31,8 +31,6 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover — py3.10 fallback
     import tomli as tomllib  # type: ignore[no-redef]
 
-import tomli_w
-
 APP_NAME = "prompt-enhancer"
 
 logger = logging.getLogger("enhancer.config")
@@ -186,6 +184,8 @@ def load() -> Settings:
 
 def _atomic_write_toml(path: Path, payload: dict[str, Any]) -> None:
     """Atomic-rename write with .bak retention of the previous file."""
+    import tomli_w  # runtime dep; lazy-imported so module load doesn't fail when settings are never written
+
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     bak = path.with_suffix(path.suffix + ".bak")
