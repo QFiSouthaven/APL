@@ -6,7 +6,7 @@ Local Desktop Studio for multi-pass AI prompt enhancement. LM Studio first; Olla
 
 Per `STATUS.md`, phases 0–7 are claimed done: 4-pass pipeline, SQLite persistence, ChatProvider abstraction, typer CLI, NiceGUI Studio, packaging scaffolded, live-tested 2026-04-28 against gpt-oss-120b.
 
-**Trust `STATUS.md` only after verifying against `git log` and `pytest -q`.** STATUS.md has drifted in the past — `api/`, `ui/pages/templates.py`, and `ui/pages/compare.py` shipped while STATUS.md still listed them as v0.2. The test count claim (41 in 5 files) does not match disk (9 files). When in doubt, read `src/` and `tests/` directly.
+**Trust `STATUS.md` only after verifying against `git log` and `pytest -q`.** STATUS.md has drifted in the past — `api/`, `ui/pages/templates.py`, and `ui/pages/compare.py` shipped while STATUS.md still listed them as v0.2; the test count claim has lagged disk multiple times. As of v1.0.0 (2026-05-03) the suite is **85 tests in 12 files**. When in doubt, read `src/` and `tests/` directly.
 
 ## Frozen pipeline invariants
 
@@ -35,14 +35,19 @@ After a repo move, the hook in `~/.claude/settings.local.json` must be repointed
 ```
 src/enhancer/
   core/         pipeline, passes, transforms, parsing, budgeting, events
-  llm/          ChatProvider ABC + lmstudio (full) + ollama/openai/anthropic stubs + lms_link
+  llm/          ChatProvider ABC + lmstudio (full, retry-wrapped) + ollama/openai/anthropic stubs
+                + lms_link (base-URL override) + lms_discovery (auto-load via `lms` CLI)
+                + resilience (@with_retry, @with_stream_retry, ProviderHealth circuit breaker)
   persistence/  SQLite (schema.sql, db, runs, sessions) + JSONL dual-writer + safestorage
-  api/          REST + discovery
-  cli/          typer entrypoint (main) + extras (batch / compare / export)
+  api/          REST + inter-product discovery (services.toml)
+  cli/          typer entrypoint (main, enhance pre-flights ensure_model_loaded) + extras (batch / compare / export)
   ui/           NiceGUI Studio: app, pages/{studio,history,analytics,compare,templates,settings}, components/
-tests/          9 files (test_api_rest, test_cli_auto_resume, test_concurrency, test_disambiguation, test_discovery, test_migration, test_parsing, test_pipeline_smoke + conftest)
-packaging/      PyInstaller spec + Inno Setup script; dist/ has built exe (2026-04-28)
-tools/          methodology_agent.py + migrate_jsonl_to_sqlite.py
+                (session_drawer surfaces resilience.get_session_stats())
+tests/          12 files: test_api_rest, test_branching, test_cli_auto_resume, test_concurrency,
+                test_config_toml, test_disambiguation, test_discovery, test_lms_discovery,
+                test_migration, test_parsing, test_pipeline_smoke, test_resilience (+ conftest)
+packaging/      PyInstaller spec + Inno Setup script; dist/ has built exe; release/ has signed installer
+tools/          methodology_agent.py (Stop-hook reviewer; pre-flights ensure_model_loaded) + migrate_jsonl_to_sqlite.py
 ```
 
 ## Entry points

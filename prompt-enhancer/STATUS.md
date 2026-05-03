@@ -14,23 +14,27 @@ Enhancement Agent on every diff._
 | 4 — typer CLI | ✅ done | `version` `models` `enhance` `history` `ui` `batch` `compare` `export` + interactive disambiguation Q&A + `--skip-clarify` flag |
 | 5 — NiceGUI Desktop Studio | ✅ done | Studio (status strip + tabs + sliders + diff view + 6 components), History (with branch_tree row-detail), Analytics, Compare, Templates (8 seeds), Settings, disambiguation modal |
 | 6 — packaging | ✅ done | `dist/prompt-enhancer/prompt-enhancer.exe` rebuilt 2026-05-03 against Python 3.12 (117 MB, smoke=HTTP 200). Inno installer compiled to `release/prompt-enhancer-setup.exe` (38 MB, SHA256 `96a6ff106bc235f5ec3d678d1f00f1db834e510cfd54a0b86460db44e7d86198`) using Inno Setup 6.7.1. Includes the `tomli-w` runtime-dep fix from commit `20112ff`. |
-| 7 — verification | ✅ **LIVE-TESTED** | **59/59 unit tests green** (re-run 2026-05-02 after merging items #4 + #6) + end-to-end run against gpt-oss-120b via LM Link confirmed below |
+| 7 — verification | ✅ **LIVE-TESTED** | **85/85 unit tests green** (re-run 2026-05-03 after v1.0 discovery + resilience landed) + end-to-end run against gpt-oss-120b via LM Link confirmed below |
+| 8 — LM Studio discovery + auto-load | ✅ done | `src/enhancer/llm/lms_discovery.py` + 10 tests. Calls `/api/v0/models` for state-aware listing, falls back to `lms load` CLI shell-out when nothing is loaded, raises `ModelLoadUnavailableError` with operator instructions on failure. Wired into CLI `enhance`, NiceGUI startup, and the methodology-agent Stop hook. |
+| 9 — provider-layer resilience | ✅ done | `src/enhancer/llm/resilience.py` + 16 tests. `@with_retry` + `@with_stream_retry` decorators (exp-backoff, ±25 % jitter, 3 retries, honors `Retry-After` on 429); `ProviderHealth` circuit-breaker opens after 3 consecutive final failures, 30 s cooldown. Session counters surfaced to the Studio session drawer. Pipeline invariants in `core/pipeline.py` are NOT touched — wrap is at the provider layer. |
 
-## Test status (re-run 2026-05-02, Python 3.12 dev venv)
+## Test status (re-run 2026-05-03, Python 3.12 dev venv, v1.0.0)
 
 ```
 tests/test_api_rest.py .....                   5 passed   (REST endpoints)
-tests/test_branching.py ...                    3 passed   (branch-from-pass — item #4)
+tests/test_branching.py ...                    3 passed   (branch-from-pass)
 tests/test_cli_auto_resume.py ..               2 passed   (CLI resume after disambig)
 tests/test_concurrency.py ...                  3 passed   (the three load-bearing guards)
-tests/test_config_toml.py ...                  3 passed   (TOML settings — item #6)
+tests/test_config_toml.py ...                  3 passed   (TOML settings)
 tests/test_disambiguation.py ....              4 passed   (pause + resume + per-pass timing + skip-clarify)
-tests/test_discovery.py .....                  5 passed   (provider/model discovery)
+tests/test_discovery.py .....                  5 passed   (inter-product service discovery)
+tests/test_lms_discovery.py ..........        10 passed   (LM Studio model discovery + auto-load)
 tests/test_migration.py ....                   4 passed   (JSONL → SQLite)
 tests/test_parsing.py ...........................  27 passed
 tests/test_pipeline_smoke.py ...               3 passed   (end-to-end via FakeChatProvider)
+tests/test_resilience.py ................     16 passed   (retry + circuit breaker + stream wrap)
                                               ────────────
-                                              59 passed in 12.10s
+                                              85 passed in 12.09s
 ```
 
 **Build-env note:** dev venv was rebuilt fresh on 2026-05-02 against Python 3.12.0 (commit `3a6fa8e`). The previous venv ran on Python 3.13 — the bundled exe in `packaging/dist/` still carries 3.13 `.pyd` files and may need a rebuild before shipping.

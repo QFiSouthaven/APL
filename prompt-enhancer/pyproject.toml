@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prompt-enhancer"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local Desktop Studio for multi-pass AI prompt enhancement (LM Studio first, providers pluggable)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Halkive" }]
 keywords = ["prompt-engineering", "llm", "lmstudio", "ollama", "agent"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: Microsoft :: Windows",
