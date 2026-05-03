@@ -22,6 +22,7 @@ ChatProvider abstraction integrity.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import subprocess
 import sys
@@ -92,25 +93,62 @@ def _truncate(text: str, max_chars: int = 12000) -> str:
     return f"{text[:head]}\n[...{len(text) - head - tail} chars truncated...]\n{text[-tail:]}"
 
 
+_EMPTY_CONTENT_NOTICE = (
+    "_methodology agent returned empty content. Likely a reasoning-token "
+    "model whose thinking is filtered out of the streamed deltas. Set "
+    "`ENHANCER_METHODOLOGY_MODEL` to a non-reasoning model, or confirm "
+    "streaming SSE is reaching this script._"
+)
+
+
 def _ask_lms(diff: str) -> str:
-    """One-shot call to LM Studio. Short timeout; failures swallowed."""
+    """Streaming call to LM Studio.
+
+    Streaming mirrors the Pass 4 fix: non-streaming chat returns empty
+    `content` against reasoning-token models (gpt-oss-120b) because the
+    reasoning channel is filtered before `message.content` is populated.
+    Streaming concatenates `delta.content` and bypasses that filter.
+
+    Failures degrade to a visible diagnostic string — never silent empty.
+    """
     body = {
         "model": os.environ.get("ENHANCER_METHODOLOGY_MODEL", ""),
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": USER_TEMPLATE.format(diff=_truncate(diff))},
         ],
-        "stream": False,
+        "stream": True,
         "temperature": 0.4,
         "max_tokens": 600,
     }
     if not body["model"]:
         body.pop("model")
     try:
+        chunks: list[str] = []
         with httpx.Client(timeout=TIMEOUT) as client:
-            resp = client.post(f"{LMS_BASE_URL}/chat/completions", json=body)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            with client.stream(
+                "POST", f"{LMS_BASE_URL}/chat/completions", json=body
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(payload)
+                        delta = (
+                            obj.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content")
+                        )
+                        if delta:
+                            chunks.append(delta)
+                    except (KeyError, IndexError, ValueError):
+                        continue
+        content = "".join(chunks).strip()
+        return content if content else _EMPTY_CONTENT_NOTICE
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         return f"_methodology agent unavailable: {exc!s}_"
 
