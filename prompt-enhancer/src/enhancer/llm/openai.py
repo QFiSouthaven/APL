@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from .base import ChatProvider
+from .resilience import ProviderHealth
 
 
 _INSTALL_HINT = (
@@ -21,6 +22,9 @@ _INSTALL_HINT = (
 
 class OpenAIProvider(ChatProvider):
     name = "openai"
+
+    def __init__(self) -> None:
+        self._health = ProviderHealth()
 
     async def list_models(self) -> list[str]:
         raise NotImplementedError(_INSTALL_HINT)

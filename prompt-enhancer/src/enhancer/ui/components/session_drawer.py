@@ -14,6 +14,7 @@ from typing import Callable
 
 from nicegui import ui
 
+from ...llm.resilience import get_session_stats
 from ...persistence import sessions as sessions_module
 from ...persistence.db import connect
 
@@ -26,6 +27,7 @@ class SessionDrawer:
         self._active_id: str | None = None
         self._on_change: Callable[[str | None], None] | None = None
         self._list_container: ui.element | None = None
+        self._stats_label: ui.element | None = None
 
     @property
     def active_id(self) -> str | None:
@@ -52,6 +54,12 @@ class SessionDrawer:
                       on_click=lambda: self._set_active(None)).props("flat dense")
             ui.separator().classes("my-2")
             self._list_container = ui.column().classes("w-full gap-1")
+
+            # Resilience counter strip — surfaced from the provider-layer
+            # @with_retry / @with_stream_retry decorators. Lazy refresh
+            # on drawer reopen via self.refresh().
+            ui.separator().classes("my-2")
+            self._stats_label = ui.label().classes("text-caption text-grey")
         self.refresh()
 
     # ── public ──────────────────────────────────────────────────────
@@ -62,13 +70,20 @@ class SessionDrawer:
         self._list_container.clear()
         with self._list_container:
             sessions = sessions_module.list_all(self._db_path, active_id=self._active_id)
-            if not sessions:
+            if sessions:
+                for s in sessions:
+                    self._render_row(s)
+            else:
                 ui.label("No sessions yet — create one above.").classes(
                     "text-caption text-grey"
                 )
-                return
-            for s in sessions:
-                self._render_row(s)
+        if self._stats_label is not None:
+            stats = get_session_stats()
+            self._stats_label.set_text(
+                f"LLM retries: {stats['retries']} · "
+                f"failures: {stats['failures']} · "
+                f"recoveries: {stats['recoveries']}"
+            )
 
     # ── internals ───────────────────────────────────────────────────
 

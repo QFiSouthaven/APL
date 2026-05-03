@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from .base import ChatProvider
+from .resilience import ProviderHealth
 
 
 _INSTALL_HINT = (
@@ -23,6 +24,11 @@ _INSTALL_HINT = (
 
 class OllamaProvider(ChatProvider):
     name = "ollama"
+
+    def __init__(self) -> None:
+        # Parity with LMStudioProvider — once chat() is implemented the
+        # @with_retry / @with_stream_retry decorators consult self._health.
+        self._health = ProviderHealth()
 
     async def list_models(self) -> list[str]:
         raise NotImplementedError(_INSTALL_HINT)

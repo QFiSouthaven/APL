@@ -28,6 +28,7 @@ import httpx
 
 from .base import ChatProvider
 from .lms_link import get_active_base_url
+from .resilience import ProviderHealth, with_retry, with_stream_retry
 
 logger = logging.getLogger("enhancer.llm.lmstudio")
 
@@ -49,6 +50,7 @@ class LMStudioProvider(ChatProvider):
         self._default_base_url = base_url.rstrip("/")
         self.management_url = management_url.rstrip("/")
         self.default_timeout = default_timeout
+        self._health = ProviderHealth()
 
     @property
     def base_url(self) -> str:
@@ -93,6 +95,7 @@ class LMStudioProvider(ChatProvider):
 
     # ── completion ──────────────────────────────────────────────────
 
+    @with_retry()
     async def chat(
         self,
         messages: list[dict],
@@ -102,7 +105,13 @@ class LMStudioProvider(ChatProvider):
         max_tokens: int | None = None,
         timeout: float = 120.0,
     ) -> str:
-        """Non-streaming chat completion."""
+        """Non-streaming chat completion.
+
+        Wrapped by :func:`with_retry` — transient connection errors,
+        5xx, 429 (with Retry-After), and empty-content responses retry
+        with exponential backoff. The circuit breaker on ``self._health``
+        opens after 3 consecutive final failures.
+        """
         body: dict = {"model": model, "messages": messages, "stream": False}
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
@@ -113,6 +122,7 @@ class LMStudioProvider(ChatProvider):
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
 
+    @with_stream_retry()
     async def chat_stream(
         self,
         messages: list[dict],
