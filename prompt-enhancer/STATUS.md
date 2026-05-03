@@ -13,7 +13,7 @@ Enhancement Agent on every diff._
 | 3 — ChatProvider abstraction | ✅ done | LM Studio fully implemented; Ollama/OpenAI/Anthropic stubs with install hints |
 | 4 — typer CLI | ✅ done | `version` `models` `enhance` `history` `ui` `batch` `compare` `export` + interactive disambiguation Q&A + `--skip-clarify` flag |
 | 5 — NiceGUI Desktop Studio | ✅ done | Studio (status strip + tabs + sliders + diff view + 6 components), History (with branch_tree row-detail), Analytics, Compare, Templates (8 seeds), Settings, disambiguation modal |
-| 6 — packaging | partially built | PyInstaller spec + Inno Setup script in `packaging/`; folder-mode `dist/prompt-enhancer/prompt-enhancer.exe` rebuilt 2026-05-02 against Python 3.12 (240 MB, smoke=HTTP 200). Inno installer (`release/`) not yet compiled — `iscc` not on PATH. |
+| 6 — packaging | ✅ done | `dist/prompt-enhancer/prompt-enhancer.exe` rebuilt 2026-05-02 against Python 3.12 (240 MB, smoke=HTTP 200). Inno installer compiled to `release/prompt-enhancer-setup.exe` (74 MB, SHA256 `890d571e9b5e700692e9e1facdf630eb65dad913bc6cb58ad5d25de4658fe5ba`) using Inno Setup 6.7.1. |
 | 7 — verification | ✅ **LIVE-TESTED** | **59/59 unit tests green** (re-run 2026-05-02 after merging items #4 + #6) + end-to-end run against gpt-oss-120b via LM Link confirmed below |
 
 ## Test status (re-run 2026-05-02, Python 3.12 dev venv)
@@ -184,11 +184,14 @@ python tools\migrate_jsonl_to_sqlite.py --source ..\swarm-agent-dev\agent_pipeli
    here" button on completed `pass_card`s; status-strip badge while branch
    streams; History row-detail Pass-1/2/3 buttons. Re-uses `AGENT_STEP
    step="branch_start"` (no EventType v2 bump). Tests: `test_branching.py` (3).
-5. **PyInstaller build (Python 3.12)** — PyInstaller half done 2026-05-02:
-   `packaging/dist/prompt-enhancer/` rebuilt against Python 3.12 (240 MB,
-   smoke=HTTP 200). Inno Setup compile of `release/prompt-enhancer-setup.exe`
-   still pending — `iscc` not on PATH. Install Inno Setup 6+
-   (https://jrsoftware.org/isdl.php), then `iscc packaging/installer.iss`.
+5. ~~**PyInstaller build (Python 3.12)** — spec + Inno script in `packaging/`.
+   Existing `dist/prompt-enhancer.exe` is from 2026-04-28 against Python 3.13;
+   needs rebuild against the 3.12 dev venv before shipping.~~
+   ✅ **Shipped** 2026-05-02. `dist/prompt-enhancer/prompt-enhancer.exe`
+   rebuilt against Python 3.12 (240 MB, smoke=HTTP 200 at `127.0.0.1:8765`);
+   Inno Setup 6.7.1 wrapped it into `release/prompt-enhancer-setup.exe`
+   (74 MB). To rebuild: from repo root run `pyinstaller packaging/prompt-enhancer.spec --clean`
+   then `iscc packaging/installer.iss`.
 6. ~~**TOML settings file** — env vars work today; persisted-from-UI
    settings land in v0.2.~~
    ✅ **Shipped** 2026-05-02 (commit `f703012`). `config.load()` layers
