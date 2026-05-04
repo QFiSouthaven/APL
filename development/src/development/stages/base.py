@@ -15,9 +15,12 @@ detect what each stage contributed.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..llm_client import LLMClient
+
+if TYPE_CHECKING:
+    from ..reasoning_panel import ReasoningPanel
 
 
 class Stage(ABC):
@@ -25,12 +28,28 @@ class Stage(ABC):
 
     Subclasses set the class-level ``name`` attribute (used in events,
     logs, and ``stages_completed``) and implement :meth:`run`.
+
+    v2.1+ adds an optional ``reasoning_panel`` parameter so subclasses
+    can opt into multi-LLM reasoning (parallel critique, sequential
+    deliberation, consensus voting) without reshaping the existing
+    single-LLM code path. The default is ``None`` — backward-compat is
+    load-bearing: every v2.0 stage subclass continues to work
+    unchanged when no panel is supplied. Subclasses that DO opt in
+    branch on ``self._reasoning_panel is None`` and only consult the
+    panel when a real one is wired. The base class itself never uses
+    the panel — that's a subclass concern.
     """
 
     name: ClassVar[str]
 
-    def __init__(self, llm_client: LLMClient) -> None:
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        *,
+        reasoning_panel: "ReasoningPanel | None" = None,
+    ) -> None:
         self._llm = llm_client
+        self._reasoning_panel = reasoning_panel
 
     @abstractmethod
     async def run(self, ctx: dict[str, Any]) -> dict[str, Any]:

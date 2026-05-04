@@ -25,6 +25,19 @@ the per-layer view ``{layer_name: {path: content}}`` — distinct from the
 flat ``ctx["artifacts"]`` (``{path: content}``) that ``BuildResult``
 serializes. The Coder maintains both shapes; the Reviewer reads the
 nested one because per-layer critique is the unit of review.
+
+v2.1: optional ``reasoning_panel``. When supplied via the Stage's
+``__init__``, every per-layer critique routes through
+:meth:`ReasoningPanel.consult` instead of the bare ``LLMClient.chat``.
+The panel's ``aggregated`` field is the canonical verdict (parsed
+exactly as before), and the per-slot raw outputs are surfaced in
+``ctx["review"][layer]["panel"]`` for observability. When
+``reasoning_panel is None`` (the default), the Reviewer falls back to
+the v0.3 single-LLM behavior — byte-for-byte unchanged.
+
+The bounded-loopback contract is unchanged: panel call → verdict →
+optional regenerate → ONE re-critique (which also goes through the
+panel). The loopback budget is still one retry per layer per build.
 """
 
 from __future__ import annotations
@@ -75,7 +88,15 @@ _FALLBACK_VERDICT: dict[str, Any] = {
 
 
 class ReviewerStage(Stage):
-    """Stage 3: per-layer critique with bounded one-retry loopback."""
+    """Stage 3: per-layer critique with bounded one-retry loopback.
+
+    v2.1: when ``reasoning_panel`` is supplied via the base ``Stage``
+    constructor, each per-layer critique runs through the panel; the
+    aggregated verdict is parsed and per-slot raw outputs are surfaced
+    in ``ctx["review"][layer]["panel"]`` for observability. When the
+    panel is ``None`` (default), the v0.3 single-LLM path is used
+    unchanged.
+    """
 
     name: ClassVar[str] = "reviewer"
 
@@ -90,6 +111,16 @@ class ReviewerStage(Stage):
         # name in the set has already been regenerated once and must
         # not be regenerated again."
         loopbacks: set[str] = ctx.setdefault("_reviewer_loopbacks", set())
+
+        # Panel mode/aggregator come from the BuildRequest when set;
+        # default to "parallel" + "primary-wins" — the conservative
+        # combo that preserves single-LLM semantics for the canonical
+        # verdict while still surfacing partner outputs for telemetry.
+        request = ctx.get("build_request")
+        panel_mode = getattr(request, "panel_mode", None) or "parallel"
+        panel_aggregator = getattr(
+            request, "panel_aggregator", None
+        ) or "primary-wins"
 
         review: dict[str, dict[str, Any]] = {}
 
@@ -112,7 +143,10 @@ class ReviewerStage(Stage):
 
         for layer_name, files in artifacts.items():
             layer_obj = layer_plans.get(layer_name.lower(), {"name": layer_name})
-            verdict = await self._critique(layer_name, layer_obj, files)
+            verdict, panel_telemetry = await self._critique_with_telemetry(
+                layer_name, layer_obj, files,
+                mode=panel_mode, aggregator=panel_aggregator,
+            )
             regenerated = False
 
             # Bounded loopback: only if this layer hasn't been regen'd yet.
@@ -129,7 +163,10 @@ class ReviewerStage(Stage):
                     artifacts[layer_name] = new_files
                     regenerated = True
                     # Re-critique ONCE.
-                    verdict = await self._critique(layer_name, layer_obj, new_files)
+                    verdict, panel_telemetry = await self._critique_with_telemetry(
+                        layer_name, layer_obj, new_files,
+                        mode=panel_mode, aggregator=panel_aggregator,
+                    )
                     if verdict.get("request_regenerate") and not verdict.get(
                         "approved", False
                     ):
@@ -143,6 +180,13 @@ class ReviewerStage(Stage):
                 # If new_files is None we couldn't regenerate (no matching
                 # generator, or LayerGenerationError) — fall through with
                 # the original verdict and the pre-loopback artifacts.
+
+            # Surface per-slot panel telemetry alongside the verdict
+            # when the panel was wired. When no panel was supplied,
+            # this key is absent — so callers can detect "panel-aware
+            # build" by ``"panel" in review[layer]``.
+            if panel_telemetry is not None:
+                verdict["panel"] = panel_telemetry
 
             review[layer_name] = verdict
             if board is not None:
@@ -176,11 +220,36 @@ class ReviewerStage(Stage):
         layer_obj: dict[str, Any],
         files: dict[str, str],
     ) -> dict[str, Any]:
+        """Public-ish helper preserved for downstream callers.
+
+        Returns the verdict dict in the canonical shape. Used by the
+        :class:`~development.reviewers.round_robin.RoundRobinReviewer`
+        as its single-pass fallback. Panel telemetry is intentionally
+        dropped here — callers that want it use
+        :meth:`_critique_with_telemetry` directly.
+        """
+        verdict, _telemetry = await self._critique_with_telemetry(
+            layer_name, layer_obj, files,
+        )
+        return verdict
+
+    async def _critique_with_telemetry(
+        self,
+        layer_name: str,
+        layer_obj: dict[str, Any],
+        files: dict[str, str],
+        *,
+        mode: str = "parallel",
+        aggregator: str = "primary-wins",
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Send one critique request, with one parse-retry on garbage.
 
-        Always returns a dict with the verdict shape; on persistent
-        parse failure returns the fallback "approved" verdict so the
-        build can keep moving.
+        Returns ``(verdict, panel_telemetry)``. ``panel_telemetry`` is
+        ``None`` when no panel is wired (preserving v0.3 ctx shape) and
+        a ``{"primary": ..., "partners": [...]}`` dict when the panel
+        was consulted. The verdict is always a dict in the canonical
+        shape; on persistent parse failure it's the fallback "approved"
+        verdict so the build can keep moving.
         """
         user_prompt = _build_user_prompt(layer_name, layer_obj, files)
         messages = [
@@ -188,7 +257,10 @@ class ReviewerStage(Stage):
             {"role": "user", "content": user_prompt},
         ]
 
-        raw = await self._llm.chat(messages, temperature=0.2, max_tokens=1024)
+        raw, telemetry = await self._chat_or_panel(
+            messages, temperature=0.2, max_tokens=1024,
+            mode=mode, aggregator=aggregator,
+        )
         parsed = parse_llm_json(raw)
 
         if parsed is None:
@@ -204,7 +276,10 @@ class ReviewerStage(Stage):
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": RETRY_REMINDER},
             ]
-            raw = await self._llm.chat(messages, temperature=0.0, max_tokens=1024)
+            raw, telemetry = await self._chat_or_panel(
+                messages, temperature=0.0, max_tokens=1024,
+                mode=mode, aggregator=aggregator,
+            )
             parsed = parse_llm_json(raw)
 
         if parsed is None:
@@ -213,9 +288,52 @@ class ReviewerStage(Stage):
                 "treating as approved (best-effort fallback).",
                 layer_name,
             )
-            return dict(_FALLBACK_VERDICT)
+            return dict(_FALLBACK_VERDICT), telemetry
 
-        return _normalize_verdict(parsed)
+        return _normalize_verdict(parsed), telemetry
+
+    async def _chat_or_panel(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float,
+        max_tokens: int,
+        mode: str,
+        aggregator: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Single LLM call or full panel consultation.
+
+        Returns ``(text, panel_telemetry)``. ``panel_telemetry`` is
+        ``None`` for the no-panel path. When the panel is wired, the
+        aggregated text is what callers parse; the per-slot dict is
+        stashed for observability.
+        """
+        if self._reasoning_panel is None:
+            text = await self._llm.chat(
+                messages, temperature=temperature, max_tokens=max_tokens
+            )
+            return text, None
+
+        result = await self._reasoning_panel.consult(
+            messages,
+            mode=mode,
+            aggregator=aggregator,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        telemetry = {
+            "primary": result.primary.content,
+            "partners": [
+                {
+                    "name": p.slot_name,
+                    "content": p.content,
+                    "ms": p.duration_ms,
+                    "error": p.error,
+                }
+                for p in result.partners
+            ],
+        }
+        return result.aggregated, telemetry
 
     async def _try_regenerate(
         self,

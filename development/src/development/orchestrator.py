@@ -13,6 +13,16 @@ deployable artifacts. The previous defaults (Architect-only / Architect
 ``include_coder=True`` is preserved as a no-op flag to keep v0.2
 callsites compiling.
 
+v2.1: optional ``reasoning_panel``. When supplied to
+``Orchestrator.__init__``, the panel is threaded into every stage that
+opts in. **In v2.1 only the Reviewer wires the panel** — Architect,
+Coder, Tester, and Packager accept the kwarg (because ``Stage.__init__``
+declares it) but currently ignore it. v2.2 will extend wiring to the
+other stages once their panel-aware critique modes are designed. The
+panel's mode + aggregator come from ``BuildRequest.panel_mode`` /
+``panel_aggregator`` per-build, defaulting to ``parallel`` +
+``primary-wins``.
+
 Stage order is load-bearing per the framework doc:
 - Architect produces ``ctx["plan"]``
 - Coder consumes plan, produces ``ctx["artifacts"]`` (flat) AND
@@ -37,7 +47,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 from .llm_client import LLMClient
 from .messageboard import MessageBoard
@@ -61,6 +71,9 @@ from .types import (
     BuildResult,
 )
 
+if TYPE_CHECKING:
+    from .reasoning_panel import ReasoningPanel
+
 logger = logging.getLogger("development.orchestrator")
 
 
@@ -74,20 +87,27 @@ class Orchestrator:
         *,
         stages: Sequence[Stage] | None = None,
         include_coder: bool = False,
+        reasoning_panel: "ReasoningPanel | None" = None,
     ) -> None:
         self._llm = llm_client
         self._board = message_board
+        self._reasoning_panel = reasoning_panel
         # Default pipeline (v0.5): Architect → Coder → Reviewer → Tester
         # → Packager. The ``include_coder`` flag is a no-op kept for
         # source compat with v0.2 callsites; pass ``stages=[ArchitectStage(...)]``
         # to restore the v0.1 single-stage shape if needed.
+        #
+        # v2.1: ``reasoning_panel`` is threaded into every stage that
+        # accepts it. Currently only the Reviewer USES the panel — the
+        # others (Architect/Coder/Tester/Packager) accept the kwarg via
+        # ``Stage.__init__`` but ignore it pending v2.2 wiring.
         if stages is not None:
             self._stages: list[Stage] = list(stages)
         else:
             self._stages = [
                 ArchitectStage(llm_client),
                 CoderStage(llm_client),
-                ReviewerStage(llm_client),
+                ReviewerStage(llm_client, reasoning_panel=reasoning_panel),
                 TesterStage(llm_client),
                 PackagerStage(llm_client),
             ]
@@ -136,7 +156,15 @@ class Orchestrator:
                 and request.reviewer in REVIEWERS
             ):
                 cls = get_reviewer(request.reviewer)
-                stages_for_this_build.append(cls(self._llm))
+                # Thread the panel only into the canonical ReviewerStage
+                # — alternate reviewers (RoundRobinReviewer) do their
+                # own multi-LLM thing and don't yet accept a panel kwarg.
+                if cls is ReviewerStage:
+                    stages_for_this_build.append(
+                        cls(self._llm, reasoning_panel=self._reasoning_panel)
+                    )
+                else:
+                    stages_for_this_build.append(cls(self._llm))
             else:
                 stages_for_this_build.append(stage)
 

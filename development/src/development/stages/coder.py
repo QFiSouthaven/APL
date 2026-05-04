@@ -92,8 +92,9 @@ class CoderStage(Stage):
         *,
         tool_use: bool = False,
         tool_call_budget: int | None = None,
+        reasoning_panel: Any = None,
     ) -> None:
-        super().__init__(llm_client)
+        super().__init__(llm_client, reasoning_panel=reasoning_panel)
         self._tool_use = bool(tool_use)
         # ``None`` → use the catalog's default; ``int`` → explicit override.
         self._tool_call_budget = (

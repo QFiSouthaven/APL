@@ -25,6 +25,15 @@ class BuildRequest:
     hits the same ReviewerStage they always did. Pass ``"round-robin"``
     to route per-layer critique through the round-robin peer service.
     See ``development.reviewers.REVIEWERS`` for the registry.
+
+    ``panel_mode`` and ``panel_aggregator`` (v2.1+) configure how the
+    Reviewer's :class:`ReasoningPanel` is consulted, when one is wired
+    via :meth:`Orchestrator.__init__`. They are ignored when no panel
+    is supplied. Defaults — ``"parallel"`` + ``"primary-wins"`` — make
+    the panel act as a "primary plus advisors" critique: partners run
+    concurrently and surface in observability, but the primary's
+    verdict is the canonical one. See
+    :mod:`development.reasoning_panel` for the valid string sets.
     """
 
     goal: str
@@ -32,6 +41,8 @@ class BuildRequest:
     target_lang: str | None = None
     constraints: dict[str, Any] = field(default_factory=dict)
     reviewer: str = "single-pass"
+    panel_mode: str = "parallel"
+    panel_aggregator: str = "primary-wins"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
