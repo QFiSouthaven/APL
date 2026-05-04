@@ -4,12 +4,14 @@ The architecture diagram has the orchestrator on the left, fanning
 events to a message board, with the actual code-generating LLM and
 reviewer LLM on the right. This module is the left-side box.
 
-Pipeline-shape design decision (v0.4): the default ``Orchestrator()``
-pipeline is **Architect → Coder → Reviewer → Tester** — the full v0.4
-chain that produces critiqued + tested code from a goal. The previous
-default (Architect-only / Architect → Coder → Reviewer) is still
-reachable via the ``stages=`` override; ``include_coder=True`` is
-preserved as a no-op flag to keep v0.2 callsites compiling.
+Pipeline-shape design decision (v0.5): the default ``Orchestrator()``
+pipeline is **Architect → Coder → Reviewer → Tester → Packager** — the
+full five-stage chain that turns a goal into critiqued, tested, and
+deployable artifacts. The previous defaults (Architect-only / Architect
+→ Coder / Architect → Coder → Reviewer / Architect → Coder → Reviewer
+→ Tester) are still reachable via the ``stages=`` override;
+``include_coder=True`` is preserved as a no-op flag to keep v0.2
+callsites compiling.
 
 Stage order is load-bearing per the framework doc:
 - Architect produces ``ctx["plan"]``
@@ -23,7 +25,12 @@ Stage order is load-bearing per the framework doc:
   bounded loopback per layer (separate budget from the Reviewer's),
   re-syncs flat view if it regenerated. Records results in
   ``ctx["test_results"]``.
-- Packager remains a stub for v0.5.
+- Packager reads the plan + final artifacts and emits Dockerfile,
+  docker-compose.yml, .env.example, deploy.sh, deploy.ps1, README.md
+  under a synthetic "packaging" layer. Validates each file
+  structurally and records the verdicts in
+  ``ctx["package_validation"]``. Validation failures are warnings,
+  not gates — the build always completes once Packager runs.
 """
 
 from __future__ import annotations
@@ -34,7 +41,14 @@ from typing import Sequence
 
 from .llm_client import LLMClient
 from .messageboard import MessageBoard
-from .stages import ArchitectStage, CoderStage, ReviewerStage, Stage, TesterStage
+from .stages import (
+    ArchitectStage,
+    CoderStage,
+    PackagerStage,
+    ReviewerStage,
+    Stage,
+    TesterStage,
+)
 from .types import (
     BUILD_DONE,
     BUILD_FAILED,
@@ -62,10 +76,10 @@ class Orchestrator:
     ) -> None:
         self._llm = llm_client
         self._board = message_board
-        # Default pipeline (v0.4): Architect → Coder → Reviewer → Tester.
-        # The ``include_coder`` flag is a no-op kept for source compat
-        # with v0.2 callsites; pass ``stages=[ArchitectStage(...)]`` to
-        # restore the v0.1 single-stage shape if needed.
+        # Default pipeline (v0.5): Architect → Coder → Reviewer → Tester
+        # → Packager. The ``include_coder`` flag is a no-op kept for
+        # source compat with v0.2 callsites; pass ``stages=[ArchitectStage(...)]``
+        # to restore the v0.1 single-stage shape if needed.
         if stages is not None:
             self._stages: list[Stage] = list(stages)
         else:
@@ -74,6 +88,7 @@ class Orchestrator:
                 CoderStage(llm_client),
                 ReviewerStage(llm_client),
                 TesterStage(llm_client),
+                PackagerStage(llm_client),
             ]
 
     @property
@@ -138,6 +153,7 @@ class Orchestrator:
             duration_ms=int(duration_ms),
             errors=tuple(errors),
             test_results=dict(ctx.get("test_results", {})),
+            package_validation=dict(ctx.get("package_validation", {})),
         )
 
         if not errors:

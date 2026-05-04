@@ -38,6 +38,12 @@ class BuildResult:
     each layer name to a result dict ``{status, duration_ms, num_passed,
     num_failed, runner, stdout_tail, stderr_tail, regenerated}``. Empty
     when the Tester didn't run or had no artifacts to test.
+
+    ``package_validation`` is populated by the Packager stage (v0.5+)
+    and maps each emitted packaging file path to a structural-validation
+    dict ``{file, ok, issues}``. The Packager is informational, not a
+    gate — entries with ``ok=False`` are warnings, not build failures.
+    Empty when the Packager didn't run.
     """
 
     request: BuildRequest
@@ -47,6 +53,7 @@ class BuildResult:
     duration_ms: int
     errors: tuple[str, ...] = ()
     test_results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    package_validation: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

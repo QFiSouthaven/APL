@@ -70,18 +70,22 @@ async def test_build_failure_publishes_failure_events(tmp_board: MessageBoard):
 
 
 @pytest.mark.asyncio
-async def test_default_pipeline_is_architect_coder_reviewer_tester(
+async def test_default_pipeline_is_architect_coder_reviewer_tester_packager(
     fake_lm: FakeLMClient, tmp_board: MessageBoard
 ):
-    """v0.4 default: Architect → Coder → Reviewer → Tester.
+    """v0.5 default: Architect → Coder → Reviewer → Tester → Packager.
 
     Pinned because the framework doc commits to this sequence as the
-    canonical full-build chain. v0.5+ adds Packager as an explicit
-    addition; default-removal is a v3.0 break.
+    canonical full-build chain. Packager is the terminal stage;
+    removal of any stage from the default is a v3.0 break.
     """
     orch = Orchestrator(fake_lm, tmp_board)
     assert [type(s).__name__ for s in orch.stages] == [
-        "ArchitectStage", "CoderStage", "ReviewerStage", "TesterStage",
+        "ArchitectStage",
+        "CoderStage",
+        "ReviewerStage",
+        "TesterStage",
+        "PackagerStage",
     ]
 
 
