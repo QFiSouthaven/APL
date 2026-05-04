@@ -14,7 +14,7 @@ Enhancement Agent on every diff._
 | 4 — typer CLI | ✅ done | `version` `models` `enhance` `history` `ui` `batch` `compare` `export` + interactive disambiguation Q&A + `--skip-clarify` flag |
 | 5 — NiceGUI Desktop Studio | ✅ done | Studio (status strip + tabs + sliders + diff view + 6 components), History (with branch_tree row-detail), Analytics, Compare, Templates (8 seeds), Settings, disambiguation modal |
 | 6 — packaging | ✅ done | `dist/prompt-enhancer/prompt-enhancer.exe` rebuilt 2026-05-03 against Python 3.12 (117 MB, smoke=HTTP 200). Inno installer compiled to `release/prompt-enhancer-setup.exe` (38 MB, SHA256 `96a6ff106bc235f5ec3d678d1f00f1db834e510cfd54a0b86460db44e7d86198`) using Inno Setup 6.7.1. Includes the `tomli-w` runtime-dep fix from commit `20112ff`. |
-| 7 — verification | ✅ **LIVE-TESTED** | **275/275 prompt-enhancer tests + 129/129 round-robin tests green** (re-run 2026-05-03 after v2.0 capstone landed) |
+| 7 — verification | ✅ **LIVE-TESTED** | **284/284 prompt-enhancer tests + 129/129 round-robin tests green** (re-run 2026-05-04 after v2.0.1 pipeline wirings landed; CLI + UI smoke-tested end-to-end) |
 | 8 — LM Studio discovery + auto-load | ✅ done | `src/enhancer/llm/lms_discovery.py` + 10 tests. Calls `/api/v0/models` for state-aware listing, falls back to `lms load` CLI shell-out when nothing is loaded, raises `ModelLoadUnavailableError` with operator instructions on failure. Wired into CLI `enhance`, NiceGUI startup, and the methodology-agent Stop hook. |
 | 9 — provider-layer resilience | ✅ done | `src/enhancer/llm/resilience.py` + 16 tests. `@with_retry` + `@with_stream_retry` decorators (exp-backoff, ±25 % jitter, 3 retries, honors `Retry-After` on 429); `ProviderHealth` circuit-breaker opens after 3 consecutive final failures, 30 s cooldown. Session counters surfaced to the Studio session drawer. Pipeline invariants in `core/pipeline.py` are NOT touched — wrap is at the provider layer. |
 | 10 — multi-backend providers (v1.1) | ✅ done | `src/enhancer/llm/{ollama,openai,anthropic}.py` real implementations replacing v1.0 NotImplementedError stubs. All three retry-wrapped. OpenAI uses `httpx` direct (skips SDK weight); Anthropic targets native `/v1/messages` shape with system-role lifting and typed-SSE parsing, also reaches LM Studio's compat endpoint via `ENHANCER_ANTHROPIC_BASE_URL`. 23 conformance tests in `tests/test_providers.py`. |
@@ -27,8 +27,9 @@ Enhancement Agent on every diff._
 | 17 — TOML pipeline graph + validator (v2.0) | ✅ foundation done | New `src/enhancer/core/pipeline_graph.py`: `PassNode` + `PipelineGraph` frozen dataclasses, `load(path)`, `default_graph()`, and a static `validate()` that rejects configs at LOAD time if they would violate the three frozen concurrency invariants. 6 distinct failure modes each with a documented error keyword. `docs/PIPELINE_GRAPH.md` is the user-facing schema reference. 27 tests. **Pipeline integration deferred to v2.0.1.** |
 | 18 — `enhancer.transforms` entry-point group (v2.0) | ✅ done | Second entry-point group alongside `enhancer.providers`. `discover_transforms()` returns plugin classes registered under `enhancer.transforms`. Duck-checked (callable OR has `.apply()`); failures logged + skipped. Built-in transforms (Persona, Magnitude, SoT) remain inline; this surface is for THIRD-PARTY plugins. 6 new tests. |
 | 19 — UI test harness + smoke coverage (v2.0) | ✅ done | Closed the historic UI testing gap. 53 tests across `test_ui_pages.py` (6 page modules) + `test_ui_components.py` (6 component modules). `ui_tmp_db` fixture in `conftest.py` redirects DB path to `tmp_path` so render() smoke tests don't touch real user data. Decision record at `docs/UI_TESTING.md`: import-only smoke for v2.0; `nicegui.testing` interaction harness deferred to v2.1. |
+| 20 — pipeline wirings (v2.0.1) | ✅ done | Three optional `run_pipeline` parameters that preserve all pre-2.0.1 behavior when `None`: `pipeline_graph` (validated at call-time via `core.pipeline_graph.validate`; rejects invariant-violating configs BEFORE any LLM call); `mcp_invoker` + `mcp_pre_pass1` / `mcp_pre_pass3` (calls MCP tools and stitches results into the user message via `[MCP CONTEXT]…[END MCP CONTEXT]` block — failures swallowed so a misbehaving MCP server can't break a pipeline run); `model_router` auto-selection for Pass 4 scorer (when `opts.scorer_model` is empty, picks task-aware scorer from `provider.list_models()`; falls back to `model` on failure). 9 new tests in `test_pipeline_v201.py`. **All three frozen concurrency invariants survived intact** — `tests/test_concurrency.py` passes unchanged. |
 
-## Test status (re-run 2026-05-03, Python 3.12 dev venv, v2.0.0)
+## Test status (re-run 2026-05-04, Python 3.12 dev venv, v2.0.1)
 
 prompt-enhancer suite (`prompt-enhancer/tests/`):
 
@@ -48,13 +49,14 @@ tests/test_model_router.py ............................  28 passed  (task-aware 
 tests/test_parsing.py ...........................  27 passed
 tests/test_pipeline_graph.py ..............................  27 passed   (TOML loader + 6 invariant guards — v2.0)
 tests/test_pipeline_smoke.py ...               3 passed   (end-to-end via FakeChatProvider)
+tests/test_pipeline_v201.py .........          9 passed   (graph + MCP hooks + model_router wirings — v2.0.1)
 tests/test_providers.py .......................  23 passed   (cross-provider conformance — v1.1)
 tests/test_registry.py ..............          14 passed   (provider + transform entry-points — v2.0)
 tests/test_resilience.py ................     16 passed   (retry + circuit breaker + stream wrap)
 tests/test_ui_components.py ............................  28 passed   (UI component smoke — v2.0)
 tests/test_ui_pages.py .........................  25 passed   (UI page smoke — v2.0)
                                               ────────────
-                                              275 passed in 13.30s
+                                              284 passed in 13.21s
 ```
 
 round-robin suite (`round-robin/tests/`):

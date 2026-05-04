@@ -5,4 +5,4 @@ The public API is intentionally tiny: most callers use the CLI, the UI, or
 ``enhancer.llm`` and persistence under ``enhancer.persistence``.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
