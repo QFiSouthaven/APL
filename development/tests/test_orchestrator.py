@@ -9,7 +9,8 @@ import pytest
 
 from development.messageboard import MessageBoard
 from development.orchestrator import Orchestrator
-from development.stages import ArchitectStage
+from development.stages import ArchitectStage, CoderStage
+from development.stages import coder as coder_module
 from development.stages.base import Stage
 from development.types import (
     BUILD_DONE,
@@ -28,7 +29,16 @@ from tests.conftest import FakeLMClient
 async def test_build_runs_architect_and_emits_events(
     fake_lm: FakeLMClient, tmp_board: MessageBoard
 ):
-    orch = Orchestrator(fake_lm, tmp_board)
+    """Default pipeline (v0.3) is Architect → Coder → Reviewer.
+
+    Use a minimal stages=[ArchitectStage] override so this test pins
+    the Architect-only event sequence; the full pipeline event sequence
+    is covered separately below.
+    """
+    orch = Orchestrator(
+        fake_lm, tmp_board,
+        stages=[ArchitectStage(fake_lm)],
+    )
     result = await orch.build(BuildRequest(goal="a counter app"))
 
     assert result.stages_completed == ("architect",)
@@ -60,11 +70,19 @@ async def test_build_failure_publishes_failure_events(tmp_board: MessageBoard):
 
 
 @pytest.mark.asyncio
-async def test_default_pipeline_is_just_architect(
+async def test_default_pipeline_is_architect_coder_reviewer(
     fake_lm: FakeLMClient, tmp_board: MessageBoard
 ):
+    """v0.3 default: Architect → Coder → Reviewer.
+
+    Pinned because the framework doc commits to this sequence as the
+    canonical full-build chain. v0.4+ adds Tester then Packager as
+    explicit additions; default-removal is a v3.0 break.
+    """
     orch = Orchestrator(fake_lm, tmp_board)
-    assert [type(s).__name__ for s in orch.stages] == ["ArchitectStage"]
+    assert [type(s).__name__ for s in orch.stages] == [
+        "ArchitectStage", "CoderStage", "ReviewerStage",
+    ]
 
 
 class _RecordingStage(Stage):
@@ -120,3 +138,113 @@ async def test_failure_in_second_stage_keeps_first_stage_in_completed(
 
     assert result.stages_completed == ("architect",)
     assert any("boom" in e for e in result.errors)
+
+
+# ── v0.2 Coder integration ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_coder_runs_after_architect_when_both_succeed(
+    monkeypatch, tmp_board: MessageBoard
+):
+    """Pipeline [Architect, Coder]: plan flows from Arch ctx → Coder ctx."""
+
+    async def fake_backend_gen(plan, layer, llm):
+        return {"server.py": "print('ok')"}
+
+    monkeypatch.setattr(coder_module, "LAYER_GENERATORS", {"backend": fake_backend_gen})
+
+    plan_json = json.dumps(
+        {
+            "stack": {"backend": "fastapi"},
+            "layers": [{"name": "backend", "purpose": "api", "files": ["server.py"]}],
+            "dependencies": [],
+            "constraints_satisfied": {},
+        }
+    )
+    fake = FakeLMClient(responses=[plan_json])
+    orch = Orchestrator(
+        fake, tmp_board,
+        stages=[ArchitectStage(fake), CoderStage(fake)],
+    )
+
+    result = await orch.build(BuildRequest(goal="rest api"))
+
+    assert result.stages_completed == ("architect", "coder")
+    assert result.errors == ()
+    assert result.artifacts == {"server.py": "print('ok')"}
+    assert result.plan["stack"] == {"backend": "fastapi"}
+
+
+@pytest.mark.asyncio
+async def test_coder_does_not_run_when_architect_fails(tmp_board: MessageBoard):
+    """If the Architect raises, the Coder must not get a chance to run."""
+    coder_ran = False
+
+    class _RecordingCoder(Stage):
+        name = "coder"
+
+        async def run(self, ctx):
+            nonlocal coder_ran
+            coder_ran = True
+            return ctx
+
+    bad = FakeLMClient(responses=["garbage", "still garbage"])
+    orch = Orchestrator(
+        bad,
+        tmp_board,
+        stages=[ArchitectStage(bad), _RecordingCoder(bad)],
+    )
+    result = await orch.build(BuildRequest(goal="x"))
+
+    assert coder_ran is False
+    assert result.stages_completed == ()
+    assert any("architect" in e for e in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_build_produces_artifacts(monkeypatch, tmp_board: MessageBoard):
+    """Full happy path: BuildRequest → plan → multi-layer artifacts."""
+
+    async def gen_backend(plan, layer, llm):
+        return {"app.py": "# backend"}
+
+    async def gen_frontend(plan, layer, llm):
+        return {"index.html": "<html></html>"}
+
+    monkeypatch.setattr(
+        coder_module,
+        "LAYER_GENERATORS",
+        {"backend": gen_backend, "frontend": gen_frontend},
+    )
+
+    plan_json = json.dumps(
+        {
+            "stack": {"backend": "flask", "frontend": "vanilla"},
+            "layers": [
+                {"name": "backend", "files": ["app.py"]},
+                {"name": "frontend", "files": ["index.html"]},
+            ],
+            "dependencies": [],
+            "constraints_satisfied": {},
+        }
+    )
+    fake = FakeLMClient(responses=[plan_json])
+    orch = Orchestrator(
+        fake,
+        tmp_board,
+        stages=[ArchitectStage(fake), CoderStage(fake)],
+    )
+
+    result = await orch.build(BuildRequest(goal="hello world"))
+
+    assert result.stages_completed == ("architect", "coder")
+    assert result.errors == ()
+    assert result.artifacts == {"app.py": "# backend", "index.html": "<html></html>"}
+    assert result.plan["stack"]["frontend"] == "vanilla"
+
+    # Event sequence ends in BUILD_DONE.
+    events = list(reversed(tmp_board.recent(limit=20)))
+    kinds = [e.kind for e in events]
+    assert kinds[0] == BUILD_STARTED
+    assert kinds[-1] == BUILD_DONE

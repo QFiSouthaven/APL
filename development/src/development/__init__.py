@@ -12,4 +12,4 @@ The umbrella's ``services.toml`` already wires that key into all peers.
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

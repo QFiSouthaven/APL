@@ -4,9 +4,20 @@ The architecture diagram has the orchestrator on the left, fanning
 events to a message board, with the actual code-generating LLM and
 reviewer LLM on the right. This module is the left-side box.
 
-v0.1 only runs the Architect stage. The class is built to take a list
-of stages so the upgrade path is "pass more stages in" without
-refactoring.
+Pipeline-shape design decision (v0.3): the default ``Orchestrator()``
+pipeline is now **Architect → Coder → Reviewer** — the full v0.3 chain
+that produces critiqued code from a goal. The previous default
+(Architect-only) is still reachable via ``stages=[ArchitectStage(...)]``;
+``include_coder=True`` is preserved as a no-op flag for the duration of
+v0.3 to keep the v0.2 callsite compiling.
+
+Stage order is load-bearing per the framework doc:
+- Architect produces ``ctx["plan"]``
+- Coder consumes plan, produces ``ctx["artifacts"]`` (flat) AND
+  ``ctx["artifacts_by_layer"]`` (nested)
+- Reviewer consumes ``ctx["artifacts_by_layer"]``, may invoke layer
+  generators for one bounded loopback per layer, re-syncs flat view
+  at end so ``BuildResult.artifacts`` reflects critiqued state.
 """
 
 from __future__ import annotations
@@ -17,7 +28,7 @@ from typing import Sequence
 
 from .llm_client import LLMClient
 from .messageboard import MessageBoard
-from .stages import ArchitectStage, Stage
+from .stages import ArchitectStage, CoderStage, ReviewerStage, Stage
 from .types import (
     BUILD_DONE,
     BUILD_FAILED,
@@ -41,12 +52,22 @@ class Orchestrator:
         message_board: MessageBoard,
         *,
         stages: Sequence[Stage] | None = None,
+        include_coder: bool = False,
     ) -> None:
         self._llm = llm_client
         self._board = message_board
-        # Default pipeline: just the Architect for v0.1. Tests / future
-        # versions can pass an explicit list to extend.
-        self._stages: list[Stage] = list(stages) if stages else [ArchitectStage(llm_client)]
+        # Default pipeline (v0.3): Architect → Coder → Reviewer. The
+        # ``include_coder`` flag is now a no-op kept for source compat
+        # with v0.2 callsites; pass ``stages=[ArchitectStage(...)]`` to
+        # restore the v0.1 single-stage shape if needed.
+        if stages is not None:
+            self._stages: list[Stage] = list(stages)
+        else:
+            self._stages = [
+                ArchitectStage(llm_client),
+                CoderStage(llm_client),
+                ReviewerStage(llm_client),
+            ]
 
     @property
     def stages(self) -> list[Stage]:
