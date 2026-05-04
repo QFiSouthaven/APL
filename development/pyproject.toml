@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "development"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local LLM-driven app builder — orchestrates Architect/Coder/Reviewer/Tester/Packager stages over LM Studio."
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -42,3 +42,6 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 python_files = ["test_*.py"]
 addopts = "-ra --strict-markers"
+markers = [
+    "slow: integration tests that spawn real subprocess runners (e.g. pytest)",
+]

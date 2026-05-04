@@ -32,7 +32,13 @@ class BuildRequest:
 
 @dataclass(frozen=True)
 class BuildResult:
-    """The full outcome of a build run, including non-fatal warnings."""
+    """The full outcome of a build run, including non-fatal warnings.
+
+    ``test_results`` is populated by the Tester stage (v0.4+) and maps
+    each layer name to a result dict ``{status, duration_ms, num_passed,
+    num_failed, runner, stdout_tail, stderr_tail, regenerated}``. Empty
+    when the Tester didn't run or had no artifacts to test.
+    """
 
     request: BuildRequest
     stages_completed: tuple[str, ...]
@@ -40,6 +46,7 @@ class BuildResult:
     plan: dict[str, Any]
     duration_ms: int
     errors: tuple[str, ...] = ()
+    test_results: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
