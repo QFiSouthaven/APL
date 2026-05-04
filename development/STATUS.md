@@ -20,7 +20,7 @@ and `APL/docs/ARCHITECTURE_VISION.md` (umbrella cross-reference).
 | 7 — Web UI | ✅ done | Vanilla HTML/CSS/JS dark-themed. Build form, live event chips, expandable result panel. ~470 lines, zero deps. |
 | 8 — Integration testing | ✅ done | `@pytest.mark.integration` test exercises the full 5-stage pipeline against a real LM Studio. Auto-skipped when LM Studio unreachable or no chat model loaded. |
 
-## Test status (re-run 2026-05-04, Python 3.12 dev venv, v1.0.0)
+## Test status (re-run 2026-05-04, Python 3.12 dev venv, v2.0.0)
 
 ```
 tests/test_architect_stage.py    6 passed   (JSON parse paths + retry)
@@ -36,8 +36,12 @@ tests/test_sse_events.py         9 passed   (SSE wire format + reconnect)
 tests/test_static_ui.py          4 passed   (HTML well-formed + endpoint references)
 tests/test_tester_stage.py      16 passed   (15 fast + 1 slow real-pytest)
 tests/test_integration_lmstudio.py 1 passed (helper) + 1 deselected (real LM Studio; opt-in via -m integration)
+tests/test_tools.py             19 passed   (filesystem/git/exec sandbox + traversal guards)
+tests/test_coder_tool_use.py     8 passed   (tool_use opt-in + budget cap + dispatch)
+tests/test_stack_templates.py   21 passed   (discover_templates + fastapi-sqlite + Architect fast-path)
+tests/test_round_robin_reviewer.py 15 passed (alternate reviewer + deferred-mode fallback)
                                 ─────────
-                                139 passed, 1 deselected in 10.62s
+                                202 passed, 1 deselected in 11.31s
 ```
 
 **Run integration:** with LM Studio loaded, `pytest -m integration` against this component exercises the full pipeline end-to-end.
@@ -55,14 +59,22 @@ tests/test_integration_lmstudio.py 1 passed (helper) + 1 deselected (real LM Stu
 | `enhancer --version` (development equivalent) prints `1.0.0` | ✅ |
 | Tag `development-v1.0.0` on the release commit | ✅ Attached after release commit |
 
+## v2.0 additions
+
+| Capability | Status | Notes |
+|---|---|---|
+| MCP-style tools in Coder | ✅ done | Opt-in `tool_use=True`. Catalog: `fs_read`, `fs_list`, `git_status`, `git_log`, `git_diff`, `sandboxed_exec`. Hard cap 5 tool calls/layer. Per-layer `tempfile.TemporaryDirectory` sandbox. `_ALLOWED_BINS` whitelist for shell exec. Default `tool_use=False` preserves v1.0 behavior. |
+| Stack templates entry-point | ✅ done | `discover_templates()` walks `development.stack_templates` group. Built-in `fastapi-sqlite` template registered same way third parties will. Architect fast-path skips LLM when hint matches a registered template. |
+| Round-robin reviewer alternate | ✅ done | `BuildRequest.reviewer = "round-robin"` swaps the Reviewer for `RoundRobinReviewer` per-build. Deferred-mode fallback: round-robin's `/api/review` doesn't exist yet, so each layer falls back to single-pass with a `STAGE_PROGRESS` event noting `deferred=True`. Shared `_reviewer_loopbacks` budget across both reviewer kinds. |
+
 ## Roadmap forward
 
 ```
-v1.0  ✅ five-stage pipeline + integration test                ← YOU ARE HERE
-v2.0  ⏳ MCP tools (sandboxed exec, git, filesystem)
-       + stack templates entry-point group
-       + round-robin reviewer loop (multi-pass code review)
+v1.0  ✅ five-stage pipeline + integration test
+v2.0  ✅ MCP tools + stack templates + round-robin reviewer       ← YOU ARE HERE
 v2.x  ⏳ extracted-to-shared-lib LLM provider (apl-llm)
        + pluggable stage discovery
        + plan-format schema_version migrations
+       + native LMStudio chat_with_tools (provider method, not message-fallback)
+       + round-robin /api/review endpoint to flip the deferred-mode fallback
 ```
