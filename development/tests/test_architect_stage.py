@@ -93,10 +93,15 @@ async def test_architect_user_prompt_includes_hints_and_constraints():
     fake = FakeLMClient(responses=[json.dumps({"stack": {}, "layers": [], "dependencies": []})])
     stage = ArchitectStage(fake)
 
+    # NOTE: stack_hint deliberately doesn't match any registered
+    # `development.stack_templates` template — otherwise v2.0's
+    # Architect fast-path would skip the LLM call and `fake.calls`
+    # would be empty. This test exercises the LLM-prompt rendering
+    # path; fast-path coverage lives in tests/test_stack_templates.py.
     await stage.run(
         _ctx_for(
             "todo app",
-            stack_hint="fastapi+sqlite",
+            stack_hint="express+postgres",
             target_lang="python",
             constraints={"max_loc": 200},
         )
@@ -104,7 +109,7 @@ async def test_architect_user_prompt_includes_hints_and_constraints():
 
     user_msg = fake.calls[0]["messages"][1]["content"]
     assert "Goal: todo app" in user_msg
-    assert "fastapi+sqlite" in user_msg
+    assert "express+postgres" in user_msg
     assert "python" in user_msg
     assert "max_loc" in user_msg
 

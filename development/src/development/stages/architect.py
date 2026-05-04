@@ -18,7 +18,8 @@ import logging
 from typing import Any, ClassVar
 
 from .._json_utils import parse_llm_json
-from ..types import ArchitectFailedError, BuildRequest
+from ..templates import discover_templates
+from ..types import STAGE_PROGRESS, ArchitectFailedError, BuildRequest
 from .base import Stage
 
 logger = logging.getLogger("development.stages.architect")
@@ -50,6 +51,44 @@ class ArchitectStage(Stage):
 
     async def run(self, ctx: dict[str, Any]) -> dict[str, Any]:
         request: BuildRequest = ctx["build_request"]
+
+        # v2.0: stack-template fast path. If the request's stack_hint
+        # matches a registered template, skip the LLM call entirely and
+        # use the template's pre-built plan. This shaves ~30s off builds
+        # whose stack is well-known (FastAPI+SQLite, Express+Postgres,
+        # etc.). Templates are discovered fresh per call — entry-points
+        # are cheap to read and per-call discovery means new packages
+        # become visible without restarting the server.
+        hint = (request.stack_hint or "").lower()
+        if hint:
+            for tpl_cls in discover_templates().values():
+                try:
+                    tpl = tpl_cls()
+                    if tpl.matches(hint):
+                        plan = _normalize_plan(tpl.build_plan(request))
+                        ctx["plan"] = plan
+                        ctx["plan_source"] = f"template:{tpl.name}"
+                        board = ctx.get("message_board")
+                        if board is not None:
+                            try:
+                                board.publish(STAGE_PROGRESS, {
+                                    "stage": "architect",
+                                    "source": "template",
+                                    "template": tpl.name,
+                                })
+                            except Exception as pub_exc:  # pragma: no cover
+                                logger.warning(
+                                    "Architect: STAGE_PROGRESS publish failed: %s",
+                                    pub_exc,
+                                )
+                        return ctx
+                except Exception as exc:
+                    logger.warning(
+                        "Template %s skipped: %s", tpl_cls.__name__, exc,
+                    )
+                    continue
+
+        # Fall through to the existing LLM-driven path.
         user_prompt = _build_user_prompt(request)
 
         # First attempt.
