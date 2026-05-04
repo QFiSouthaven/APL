@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Round Robin</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Round Robin</div>
+    <div class="health-pills">
+      <span class="pill" data-peer="alpha"><span class="dot"></span> Alpha <em data-bind="alphaModel">—</em></span>
+      <span class="pill" data-peer="bravo"><span class="dot"></span> Bravo <em data-bind="bravoModel">—</em></span>
+      <span class="pill link-pill" data-bind="linkPill">LM Link: checking…</span>
+      <button id="btn-test" class="ghost">Test connection</button>
+    </div>
+    <div class="run-status" data-bind="runStatusBar"></div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <nav class="tabs">
+        <button class="tab active" data-tab="run">Run</button>
+        <button class="tab" data-tab="presets">Presets</button>
+        <button class="tab" data-tab="history">History</button>
+        <button class="tab" data-tab="charlie">Summary</button>
+        <button class="tab" data-tab="errors">Errors <span class="tab-badge" id="errors-badge" hidden>0</span></button>
+      </nav>
+
+      <section class="tab-panel active" data-panel="run">
+        <h2>Configuration</h2>
+
+        <label>Theme
+          <textarea id="cfg-theme" rows="3" placeholder="What should the agents discuss?"></textarea>
+        </label>
+
+        <fieldset>
+          <legend>Agent Alpha</legend>
+          <label>Name <input type="text" id="alpha-name" value="Alpha" /></label>
+          <label>Model
+            <select id="alpha-model"></select>
+            <span class="host-badge unknown" id="alpha-host-badge">—</span>
+          </label>
+          <label>Persona <textarea id="alpha-persona" rows="3" placeholder="System prompt for Alpha"></textarea></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Agent Bravo</legend>
+          <label>Name <input type="text" id="bravo-name" value="Bravo" /></label>
+          <label>Model
+            <select id="bravo-model"></select>
+            <span class="host-badge unknown" id="bravo-host-badge">—</span>
+          </label>
+          <label>Persona <textarea id="bravo-persona" rows="3" placeholder="System prompt for Bravo"></textarea></label>
+        </fieldset>
+
+        <fieldset>
+          <legend><label><input type="checkbox" id="charlie-enabled" /> Enable Charlie (summarizer)</label></legend>
+          <label>Charlie's model
+            <select id="charlie-model" disabled></select>
+            <span class="host-badge unknown" id="charlie-host-badge">—</span>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Loop control</legend>
+          <label>Total rounds <input type="number" id="loop-limit" min="1" max="50" value="3" /></label>
+          <label><input type="checkbox" id="pause-each-turn" /> Pause after each turn</label>
+          <label>Auto-retry on error <input type="number" id="auto-retry" min="0" max="5" value="0" /></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Intelligence</legend>
+          <label><input type="checkbox" id="intel-collab" checked /> Critical-collaborator directive</label>
+          <label><input type="checkbox" id="intel-rambling" checked /> Anti-rambling nudges (push past closure phrases)</label>
+          <label><input type="checkbox" id="intel-yesman" checked /> Anti-yes-man (contrarian after N agreements)</label>
+          <label>Agreement threshold <input type="number" id="intel-agreement-threshold" min="1" max="10" value="2" /></label>
+        </fieldset>
+
+        <div class="actions">
+          <button id="btn-start" class="primary">Start</button>
+          <button id="btn-pause" class="ghost" disabled>Pause</button>
+          <button id="btn-stop" class="danger" disabled>Stop</button>
+        </div>
+
+        <div class="actions secondary">
+          <button id="btn-save-preset" class="ghost">Save as preset…</button>
+        </div>
+      </section>
+
+      <section class="tab-panel" data-panel="presets">
+        <h2>Presets</h2>
+        <div class="actions">
+          <button id="btn-import-preset" class="ghost">Import</button>
+        </div>
+        <ul id="preset-list" class="card-list"></ul>
+      </section>
+
+      <section class="tab-panel" data-panel="history">
+        <h2>History</h2>
+        <input id="history-search" placeholder="Search themes / content…" />
+        <ul id="session-list" class="card-list"></ul>
+      </section>
+
+      <section class="tab-panel" data-panel="charlie">
+        <h2>Summary <span class="meta" id="summary-status">No summary yet.</span></h2>
+        <div class="actions">
+          <button id="btn-regenerate-summary" class="ghost" disabled>Regenerate summary</button>
+          <button id="btn-download-summary" class="ghost" disabled>Download .md</button>
+        </div>
+        <div class="viewer" id="summary-viewer"><em>Run a dialogue with Charlie enabled to generate a summary.md.</em></div>
+      </section>
+
+      <section class="tab-panel" data-panel="errors">
+        <h2>Errors <span id="errors-stats" class="meta"></span></h2>
+        <div class="actions">
+          <select id="errors-filter">
+            <option value="">All categories</option>
+            <option value="agent">Agent</option>
+            <option value="charlie">Charlie</option>
+            <option value="unhandled">Unhandled</option>
+            <option value="system">System</option>
+            <option value="network">Network</option>
+          </select>
+          <button id="btn-refresh-errors" class="ghost">Refresh</button>
+          <button id="btn-clear-errors" class="danger">Clear</button>
+        </div>
+        <ul id="error-list" class="card-list error-list"></ul>
+      </section>
+    </aside>
+
+    <section class="main">
+      <div id="run-progress" class="run-progress hidden">
+        <div class="progress-text" data-bind="progressText"></div>
+        <div class="progress-bar"><div class="progress-fill" data-bind="progressFill"></div></div>
+      </div>
+      <div id="dialogue" class="dialogue"></div>
+    </section>
+  </main>
+
+  <div id="modal-root"></div>
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>
