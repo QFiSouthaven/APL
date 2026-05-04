@@ -96,3 +96,34 @@ def event_collector():
         events.append((name, kwargs))
 
     return on_event, events
+
+
+# ─── UI test helpers ──────────────────────────────────────────────────────
+#
+# UI page render() and component constructors call ``enhancer.config.db_path``
+# (and ``data_dir`` / ``config_dir``) at runtime. Tests must NOT touch the
+# user's real %APPDATA%/prompt-enhancer DB — pin everything to ``tmp_path``.
+
+
+@pytest.fixture
+def ui_tmp_db(tmp_path, monkeypatch):
+    """Redirect config_dir / data_dir / db_path to a fresh tmp_path.
+
+    Initializes the DB with the project schema so any UI render() that
+    queries the DB (history, analytics, templates, sessions) succeeds
+    against an empty-but-valid database. Returns the db Path so tests
+    can seed rows if they want to.
+    """
+    from pathlib import Path
+
+    from enhancer import config as cfg
+    from enhancer.persistence import db as dbm
+
+    db_file = tmp_path / "enhancer.db"
+    dbm.init_db(db_file)
+
+    monkeypatch.setattr(cfg, "config_dir", lambda: Path(tmp_path))
+    monkeypatch.setattr(cfg, "data_dir", lambda: Path(tmp_path))
+    monkeypatch.setattr(cfg, "db_path", lambda: db_file)
+    monkeypatch.setattr(cfg, "jsonl_log_path", lambda: tmp_path / "events.jsonl")
+    return db_file
