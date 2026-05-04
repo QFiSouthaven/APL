@@ -15,19 +15,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+import httpx
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from dataclasses import fields
 
 from . import ENVELOPE_SCHEMA_VERSION
-from .discovery import get_all_peers
+from .discovery import get_all_peers, get_peer_url
 from .. import __version__
 from ..config import Settings, db_path, jsonl_log_path, load, save_settings
 from ..core.events import EventType
 from ..core.pipeline import PipelineOptions, build_resume_state, run_pipeline
 from ..llm.registry import get_provider
 from ..persistence import runs as runs_module
+from ..persistence import sessions as sessions_module
 
 
 # ── request / response models ────────────────────────────────────────
@@ -94,6 +97,92 @@ async def health() -> HealthResponse:
 async def peers() -> dict[str, dict[str, str]]:
     """Return the configured peer service URLs."""
     return {"services": get_all_peers()}
+
+
+@router.get("/runs")
+async def list_runs(
+    limit: int = Query(20, ge=1, le=100),
+    task_type: str | None = None,
+    min_improvement: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return recent runs from SQLite for peer products / dashboards.
+
+    The shape mirrors :func:`enhancer.persistence.runs.list_recent` —
+    it's already cross-product-friendly. We pass the params through
+    unchanged for v1.2.
+    """
+    return runs_module.list_recent(
+        db_path(),
+        limit=limit,
+        task_type=task_type,
+        min_improvement=min_improvement,
+    )
+
+
+@router.get("/runs/{run_id}")
+async def get_run(run_id: str) -> dict[str, Any]:
+    """Return a single run by ID. 404 if not found."""
+    run = runs_module.get_run(db_path(), run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return run
+
+
+@router.get("/sessions")
+async def list_sessions(limit: int = Query(20, ge=1, le=100)) -> list[dict[str, Any]]:
+    """Return recent sessions, newest-first.
+
+    ``sessions.list_all`` is already updated_at DESC; we slice the
+    result to honor ``limit``.
+    """
+    summaries = sessions_module.list_all(db_path())
+    return [
+        {
+            "id": s.id,
+            "name": s.name,
+            "created_at": s.created_at,
+            "updated_at": s.updated_at,
+            "entry_count": s.entry_count,
+            "is_active": s.is_active,
+        }
+        for s in summaries[:limit]
+    ]
+
+
+@router.post("/forward-to/{peer}")
+async def forward_to_peer(peer: str, req: EnhanceRequest) -> Response:
+    """Forward an enhance request to a peer service's ``/api/enhance``.
+
+    Returns the peer's response body **verbatim** (raw bytes) so peer
+    schema_version drift doesn't break this endpoint. The caller is
+    responsible for parsing the body.
+    """
+    import json as _json
+
+    peer_url = get_peer_url(peer)
+    if not peer_url:
+        return Response(
+            content=_json.dumps({"error": "unknown peer"}),
+            status_code=404,
+            media_type="application/json",
+        )
+
+    target = f"{peer_url}/api/enhance"
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            resp = await client.post(target, json=req.model_dump())
+    except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError) as exc:
+        return Response(
+            content=_json.dumps({"error": f"peer unreachable: {exc}"}),
+            status_code=502,
+            media_type="application/json",
+        )
+
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type=resp.headers.get("content-type", "application/json"),
+    )
 
 
 @router.post("/settings")

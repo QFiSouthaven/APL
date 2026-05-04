@@ -7,12 +7,16 @@ the documented schema and includes real Pass 4 scores (not P4_DEFAULTS).
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from enhancer.api import rest as rest_module
 from enhancer.api.rest import router
+from enhancer.persistence import runs as runs_persist
+from enhancer.persistence import sessions as sessions_persist
+from enhancer.persistence.runs import RunRecord
 
 
 # Canned LLM responses sufficient for a clean run (no disambiguation).
@@ -126,3 +130,190 @@ def test_enhance_loop_iteration_propagates(fake_app, tmp_path, monkeypatch):
     })
     assert r.status_code == 200
     assert r.json()["provenance"]["loop_iteration"] == 3
+
+
+# ── /api/runs and /api/sessions ─────────────────────────────────────
+
+
+@pytest.fixture
+def populated_db(tmp_path, monkeypatch):
+    """Seed a fresh SQLite DB with two sessions and two runs, then
+    point ``rest_module.db_path`` at it."""
+    db = tmp_path / "enhancer.db"
+    monkeypatch.setattr(rest_module, "db_path", lambda: db)
+
+    s1 = sessions_persist.create(db, name="alpha")
+    s2 = sessions_persist.create(db, name="beta")
+
+    r1 = RunRecord(
+        prompt="first prompt", enhanced_prompt="first enhanced",
+        task_type="coding", technique="precision",
+        scores={"specificity": 8, "constraints": 8, "actionability": 8, "improvement": 70},
+        session_id=s1.id, model="fake-7b",
+    )
+    r2 = RunRecord(
+        prompt="second prompt", enhanced_prompt="second enhanced",
+        task_type="writing", technique="quality",
+        scores={"specificity": 9, "constraints": 9, "actionability": 9, "improvement": 90},
+        session_id=s2.id, model="fake-7b",
+    )
+    runs_persist.save(r1, db, jsonl_path=None)
+    runs_persist.save(r2, db, jsonl_path=None)
+
+    app = FastAPI()
+    app.include_router(router)
+    return {"app": app, "db": db, "run_ids": [r1.id, r2.id],
+            "session_ids": [s1.id, s2.id]}
+
+
+def test_runs_endpoint_returns_list(populated_db):
+    client = TestClient(populated_db["app"])
+    r = client.get("/api/runs")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    assert len(body) == 2
+    ids = {row["id"] for row in body}
+    assert ids == set(populated_db["run_ids"])
+    # Smoke-check enriched score fields.
+    by_task = {row["task_type"]: row for row in body}
+    assert by_task["writing"]["improvement"] == 90
+
+
+def test_runs_endpoint_respects_limit_and_filters(populated_db):
+    client = TestClient(populated_db["app"])
+    r = client.get("/api/runs", params={"limit": 1})
+    assert r.status_code == 200
+    assert len(r.json()) == 1
+
+    r = client.get("/api/runs", params={"task_type": "coding"})
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body) == 1
+    assert body[0]["task_type"] == "coding"
+
+    r = client.get("/api/runs", params={"min_improvement": 80})
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body) == 1
+    assert body[0]["task_type"] == "writing"
+
+
+def test_run_detail_endpoint_404_when_missing(populated_db):
+    client = TestClient(populated_db["app"])
+    r = client.get("/api/runs/does-not-exist")
+    assert r.status_code == 404
+
+
+def test_run_detail_endpoint_returns_run(populated_db):
+    client = TestClient(populated_db["app"])
+    rid = populated_db["run_ids"][0]
+    r = client.get(f"/api/runs/{rid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == rid
+    assert body["prompt"] == "first prompt"
+
+
+def test_sessions_endpoint_returns_list(populated_db):
+    client = TestClient(populated_db["app"])
+    r = client.get("/api/sessions")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    assert len(body) == 2
+    ids = {row["id"] for row in body}
+    assert ids == set(populated_db["session_ids"])
+    # Each row has the expected summary keys.
+    for row in body:
+        assert {"id", "name", "created_at", "updated_at",
+                "entry_count", "is_active"} <= set(row.keys())
+
+
+def test_sessions_endpoint_respects_limit(populated_db):
+    client = TestClient(populated_db["app"])
+    r = client.get("/api/sessions", params={"limit": 1})
+    assert r.status_code == 200
+    assert len(r.json()) == 1
+
+
+# ── /api/forward-to/{peer} ──────────────────────────────────────────
+
+
+@pytest.fixture
+def app_no_db():
+    app = FastAPI()
+    app.include_router(router)
+    return app
+
+
+def test_forward_to_unknown_peer_returns_404(app_no_db, monkeypatch):
+    monkeypatch.setattr(rest_module, "get_peer_url", lambda name: "")
+
+    client = TestClient(app_no_db)
+    r = client.post("/api/forward-to/nope", json={"prompt": "hi"})
+    assert r.status_code == 404
+    assert r.json() == {"error": "unknown peer"}
+
+
+def test_forward_to_unreachable_peer_returns_502(app_no_db, monkeypatch):
+    monkeypatch.setattr(
+        rest_module, "get_peer_url",
+        lambda name: "http://127.0.0.1:1",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def _factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(rest_module.httpx, "AsyncClient", _factory)
+
+    client = TestClient(app_no_db)
+    r = client.post("/api/forward-to/round_robin", json={"prompt": "hi"})
+    assert r.status_code == 502
+    body = r.json()
+    assert "error" in body
+    assert body["error"].startswith("peer unreachable:")
+
+
+def test_forward_to_happy_path_returns_peer_body(app_no_db, monkeypatch):
+    monkeypatch.setattr(
+        rest_module, "get_peer_url",
+        lambda name: "http://127.0.0.1:9999",
+    )
+
+    canned = {"schema_version": "9.9", "prompt": "hi", "enhanced_prompt": "HI!",
+              "_marker": "from-peer"}
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = request.content
+        return httpx.Response(200, json=canned)
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def _factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(rest_module.httpx, "AsyncClient", _factory)
+
+    client = TestClient(app_no_db)
+    r = client.post(
+        "/api/forward-to/round_robin",
+        json={"prompt": "hi", "loop_iteration": 2},
+    )
+
+    assert r.status_code == 200
+    assert r.json() == canned
+    # Forwarded to the peer's /api/enhance.
+    assert captured["url"].endswith("/api/enhance")
