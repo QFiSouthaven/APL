@@ -1,0 +1,64 @@
+# APL umbrella .gitignore
+#
+# Subdirectory .gitignore files (e.g. prompt-enhancer/.gitignore) take
+# precedence and add their own component-specific patterns. This file
+# catches the common cross-component noise.
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+
+# Virtual environments (every component has its own .venv)
+.venv/
+venv/
+env/
+
+# Test + type-checker caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Env files (may contain secrets)
+.env
+.env.local
+
+# Logs + rotated logs (covers errors.log.1, errors.log.2, etc.)
+*.log
+*.log.*
+
+# Component runtime data — chat sessions, presets, rotating logs.
+# This is USER data, not source; excluded across every component to
+# prevent accidental privacy leaks on push.
+data/
+
+# Claude Code per-session artifacts (parallel-session metadata,
+# worktree state, lock files). The `**/` prefix is required for these
+# to match in nested component dirs like round-robin/.claude/...
+**/.claude/launch.json
+**/.claude/worktrees/
+**/.claude/scheduled_tasks.lock
+
+# Manual repo-state backups (e.g. prompt-enhancer.bak-20260502/)
+*.bak-*/
+
+# Misc transient
+*.tmp
