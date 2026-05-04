@@ -6,7 +6,7 @@ Local Desktop Studio for multi-pass AI prompt enhancement. LM Studio first; Olla
 
 Per `STATUS.md`, phases 0–7 are claimed done: 4-pass pipeline, SQLite persistence, ChatProvider abstraction, typer CLI, NiceGUI Studio, packaging scaffolded, live-tested 2026-04-28 against gpt-oss-120b.
 
-**Trust `STATUS.md` only after verifying against `git log` and `pytest -q`.** STATUS.md has drifted in the past — `api/`, `ui/pages/templates.py`, and `ui/pages/compare.py` shipped while STATUS.md still listed them as v0.2; the test count claim has lagged disk multiple times. As of v1.1.0 (2026-05-03) the suite is **108 tests in 13 files** (added `tests/test_providers.py` cross-provider conformance). When in doubt, read `src/` and `tests/` directly.
+**Trust `STATUS.md` only after verifying against `git log` and `pytest -q`.** STATUS.md has drifted in the past — `api/`, `ui/pages/templates.py`, and `ui/pages/compare.py` shipped while STATUS.md still listed them as v0.2; the test count claim has lagged disk multiple times. As of v1.2.0 (2026-05-03) the prompt-enhancer suite is **161 tests in 15 files**; the round-robin sibling under the APL umbrella adds **129 tests** of its own. Total umbrella: 290. When in doubt, read `src/` and `tests/` directly.
 
 ## Frozen pipeline invariants
 
@@ -36,9 +36,12 @@ After a repo move, the hook in `~/.claude/settings.local.json` must be repointed
 src/enhancer/
   core/         pipeline, passes, transforms, parsing, budgeting, events
   llm/          ChatProvider ABC + lmstudio + ollama + openai + anthropic (all four real, retry-wrapped — v1.1)
-                + lms_link (base-URL override) + lms_discovery (auto-load via `lms` CLI)
+                + lms_link (base-URL override) + lms_discovery (auto-load via `lms` CLI; multi-host aware — v1.2)
                 + resilience (@with_retry, @with_stream_retry, ProviderHealth circuit breaker)
+                + model_router (task-aware scorer selection via substring rules — v1.2)
+                + registry (`enhancer.providers` Python entry-point group — v1.2)
   observability/  configure_logging() + structlog + soft OTEL hook (env-gated on OTEL_EXPORTER_OTLP_ENDPOINT) — v1.1
+  api/          rest (incl. /api/runs, /api/sessions, /api/forward-to/{peer} — v1.2) + discovery (services.toml lookup)
   persistence/  SQLite (schema.sql, db, runs, sessions) + JSONL dual-writer + safestorage
   api/          REST + inter-product discovery (services.toml)
   cli/          typer entrypoint (main, enhance pre-flights ensure_model_loaded) + extras (batch / compare / export)

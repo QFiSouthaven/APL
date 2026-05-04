@@ -14,31 +14,53 @@ Enhancement Agent on every diff._
 | 4 — typer CLI | ✅ done | `version` `models` `enhance` `history` `ui` `batch` `compare` `export` + interactive disambiguation Q&A + `--skip-clarify` flag |
 | 5 — NiceGUI Desktop Studio | ✅ done | Studio (status strip + tabs + sliders + diff view + 6 components), History (with branch_tree row-detail), Analytics, Compare, Templates (8 seeds), Settings, disambiguation modal |
 | 6 — packaging | ✅ done | `dist/prompt-enhancer/prompt-enhancer.exe` rebuilt 2026-05-03 against Python 3.12 (117 MB, smoke=HTTP 200). Inno installer compiled to `release/prompt-enhancer-setup.exe` (38 MB, SHA256 `96a6ff106bc235f5ec3d678d1f00f1db834e510cfd54a0b86460db44e7d86198`) using Inno Setup 6.7.1. Includes the `tomli-w` runtime-dep fix from commit `20112ff`. |
-| 7 — verification | ✅ **LIVE-TESTED** | **108/108 unit tests green** (re-run 2026-05-03 after v1.1 multi-backend + observability landed) + end-to-end run against gpt-oss-120b via LM Link confirmed below |
+| 7 — verification | ✅ **LIVE-TESTED** | **161/161 prompt-enhancer tests + 129/129 round-robin tests green** (re-run 2026-05-03 after v1.2 umbrella + entry-points landed) |
 | 8 — LM Studio discovery + auto-load | ✅ done | `src/enhancer/llm/lms_discovery.py` + 10 tests. Calls `/api/v0/models` for state-aware listing, falls back to `lms load` CLI shell-out when nothing is loaded, raises `ModelLoadUnavailableError` with operator instructions on failure. Wired into CLI `enhance`, NiceGUI startup, and the methodology-agent Stop hook. |
 | 9 — provider-layer resilience | ✅ done | `src/enhancer/llm/resilience.py` + 16 tests. `@with_retry` + `@with_stream_retry` decorators (exp-backoff, ±25 % jitter, 3 retries, honors `Retry-After` on 429); `ProviderHealth` circuit-breaker opens after 3 consecutive final failures, 30 s cooldown. Session counters surfaced to the Studio session drawer. Pipeline invariants in `core/pipeline.py` are NOT touched — wrap is at the provider layer. |
 | 10 — multi-backend providers (v1.1) | ✅ done | `src/enhancer/llm/{ollama,openai,anthropic}.py` real implementations replacing v1.0 NotImplementedError stubs. All three retry-wrapped. OpenAI uses `httpx` direct (skips SDK weight); Anthropic targets native `/v1/messages` shape with system-role lifting and typed-SSE parsing, also reaches LM Studio's compat endpoint via `ENHANCER_ANTHROPIC_BASE_URL`. 23 conformance tests in `tests/test_providers.py`. |
 | 11 — observability layer (v1.1) | ✅ done | `src/enhancer/observability/__init__.py` exposes `configure_logging()` (idempotent structlog setup, JSON for non-TTY, colored otherwise), `get_logger()` re-export, `trace_block(name, **attrs)` context manager, `traced(name=None)` decorator (auto-detects async). OTEL is strictly soft — gated on `OTEL_EXPORTER_OTLP_ENDPOINT`; opentelemetry-* libs never import unless that env var is set. |
+| 12 — APL umbrella coordination (v1.2) | ✅ done | `APL/.gitignore`, `APL/README.md`, `APL/lab/onboarding.py` (seeds shared `services.toml`), and `APL/lab/launch.py` (orchestrated boot — spawns each component as subprocess, polls `/api/health`, clean shutdown on Ctrl-C). round-robin tracked under the umbrella; got its own `discovery.py` mirroring prompt-enhancer's, plus `/api/peers` + `/api/health` endpoints (additive — preserved its existing /api/health body). round-robin port fix: `_free_port()` → discovery-aware port (8766 default). |
+| 13 — task-aware scorer + multi-host (v1.2) | ✅ done | `src/enhancer/llm/model_router.py` with `select_scorer(task_type, models, preferred)` and substring-based routing rules per task_type. `src/enhancer/llm/lms_discovery.py` extended with `discover_chat_models_multihost(hosts)` and `pick_loaded_host(hosts, preferred)` for LAN-spanning discovery. 36 new tests (28 router + 8 multi-host). Wiring into pipeline.py Pass 4 deferred to v1.2.x follow-up. |
+| 14 — REST expansion + plugin entry-points (v1.2) | ✅ done | `src/enhancer/api/rest.py` gains `/api/runs`, `/api/runs/{id}`, `/api/sessions`, and `/api/forward-to/{peer}` (cross-component invocation). `src/enhancer/llm/registry.py` consults `enhancer.providers` entry-point group so third-party packages register via `[project.entry-points."enhancer.providers"]` without modifying enhancer code. Compat shim handles `importlib.metadata.entry_points` shape difference between Python 3.10 and 3.12. 19 new tests. |
 
-## Test status (re-run 2026-05-03, Python 3.12 dev venv, v1.1.0)
+## Test status (re-run 2026-05-03, Python 3.12 dev venv, v1.2.0)
+
+prompt-enhancer suite (`prompt-enhancer/tests/`):
 
 ```
-tests/test_api_rest.py .....                   5 passed   (REST endpoints)
+tests/test_api_rest.py ................        16 passed   (REST endpoints + cross-invocation — v1.2)
 tests/test_branching.py ...                    3 passed   (branch-from-pass)
 tests/test_cli_auto_resume.py ..               2 passed   (CLI resume after disambig)
 tests/test_concurrency.py ...                  3 passed   (the three load-bearing guards)
 tests/test_config_toml.py ...                  3 passed   (TOML settings)
 tests/test_disambiguation.py ....              4 passed   (pause + resume + per-pass timing + skip-clarify)
 tests/test_discovery.py .....                  5 passed   (inter-product service discovery)
-tests/test_lms_discovery.py ..........        10 passed   (LM Studio model discovery + auto-load)
+tests/test_lms_discovery.py ..................  18 passed   (LM Studio discovery + multi-host — v1.2)
 tests/test_migration.py ....                   4 passed   (JSONL → SQLite)
+tests/test_model_router.py ............................  28 passed  (task-aware scorer routing — v1.2)
 tests/test_parsing.py ...........................  27 passed
 tests/test_pipeline_smoke.py ...               3 passed   (end-to-end via FakeChatProvider)
 tests/test_providers.py .......................  23 passed   (cross-provider conformance — v1.1)
+tests/test_registry.py ........                 8 passed   (entry-points + builtin providers — v1.2)
 tests/test_resilience.py ................     16 passed   (retry + circuit breaker + stream wrap)
                                               ────────────
-                                              108 passed in 12.09s
+                                              161 passed in 12.32s
 ```
+
+round-robin suite (`round-robin/tests/`):
+
+```
+tests/test_charlie_summary.py + test_charlie_workspace.py + test_health.py
++ test_intel.py + test_lm_client.py + test_lms_cli.py + test_monitoring.py
++ test_orchestrator.py + test_server_routes.py + test_storage.py
++ test_user_config.py                          117 passed   (pre-existing)
+tests/test_discovery.py .........               9 passed   (umbrella discovery — v1.2)
+tests/test_endpoints.py ...                     3 passed   (/api/peers + /api/health — v1.2)
+                                              ────────────
+                                              129 passed in 5.34s
+```
+
+**Umbrella total: 290 tests across two components.**
 
 **Build-env note:** dev venv was rebuilt fresh on 2026-05-02 against Python 3.12.0 (commit `3a6fa8e`). The previous venv ran on Python 3.13 — the bundled exe in `packaging/dist/` still carries 3.13 `.pyd` files and may need a rebuild before shipping.
 
