@@ -6,9 +6,13 @@ verbatim — including the carefully-tuned ``idle_timeout=120.0`` default
 which protects against LM Link silently stalling a slow remote-GPU
 stream.
 
-Two endpoints are used:
+Three endpoints are used:
 
 * ``{base_url}/chat/completions`` — OpenAI-compatible chat (inference).
+  Used by ``chat`` and ``chat_stream``.
+* ``{base_url}/chat/completions`` with a ``tools`` array — OpenAI-
+  compatible function-calling. Used by ``chat_with_tools``; returns
+  OpenAI-shaped ``{content, tool_calls}`` rather than a plain string.
 * ``{management_url}/api/v0/models`` — LM Studio mgmt API for context
   windows + richer model metadata (used by ``context_window`` and the
   budgeting layer).
@@ -121,6 +125,55 @@ class LMStudioProvider(ChatProvider):
             resp = await client.post(f"{self.base_url}/chat/completions", json=body)
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
+
+    @with_retry()
+    async def chat_with_tools(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict],
+        model: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        tool_choice: str = "auto",
+        timeout: float = 120.0,
+    ) -> dict:
+        """Non-streaming chat completion with OpenAI-shaped tool calls.
+
+        Sends ``tools`` (OpenAI function-definition shape) and
+        ``tool_choice`` ("auto" by default; "required" forces a tool
+        call on models that honor it). Returns
+        ``{"content": str | None, "tool_calls": list[dict]}`` —
+        ``content`` may be ``None`` when the model invoked tools, and
+        ``tool_calls`` is a possibly-empty list of
+        ``{id, type: "function", function: {name, arguments}}`` dicts.
+
+        Wrapped by :func:`with_retry` with the same semantics as
+        :meth:`chat` — transient connection errors, 5xx, and 429 retry
+        with exponential backoff. Empty-content responses are NOT
+        treated as failures here (the dict return bypasses the
+        string-only empty-content check), since a tool-call response
+        legitimately has ``content = None``.
+        """
+        body: dict = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "tools": tools,
+            "tool_choice": tool_choice,
+        }
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        if temperature is not None:
+            body["temperature"] = temperature
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(f"{self.base_url}/chat/completions", json=body)
+            resp.raise_for_status()
+            msg = resp.json()["choices"][0]["message"]
+            return {
+                "content": msg.get("content"),
+                "tool_calls": msg.get("tool_calls") or [],
+            }
 
     @with_stream_retry()
     async def chat_stream(

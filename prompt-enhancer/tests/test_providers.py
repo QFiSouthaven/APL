@@ -302,3 +302,191 @@ def test_every_provider_has_health(factory):
     p = factory()
     assert isinstance(p._health, ProviderHealth)
     assert not p._health.is_open  # fresh instance starts closed
+
+
+# ── LMStudio chat_with_tools (OpenAI-compatible function-calling) ───
+
+
+def _openai_tool_message_response(
+    *,
+    content: str | None = None,
+    tool_calls: list[dict] | None = None,
+) -> dict:
+    """Build an OpenAI-shaped chat completion with optional ``tool_calls``."""
+    msg: dict = {"role": "assistant", "content": content}
+    if tool_calls is not None:
+        msg["tool_calls"] = tool_calls
+    return {"choices": [{"message": msg, "index": 0}]}
+
+
+_FAKE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the weather for a location",
+            "parameters": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"],
+            },
+        },
+    }
+]
+
+
+@pytest.mark.asyncio
+async def test_chat_with_tools_content_only_no_tool_calls(monkeypatch):
+    """Model returns plain content (no tool support / chose not to call)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["tools"] == _FAKE_TOOLS
+        return httpx.Response(
+            200, json=_openai_tool_message_response(content="hello there"),
+        )
+
+    _patch_httpx(monkeypatch, lmstudio_mod, handler)
+    p = LMStudioProvider()
+    out = await p.chat_with_tools(
+        [{"role": "user", "content": "hi"}],
+        tools=_FAKE_TOOLS,
+        model="x",
+    )
+    assert out == {"content": "hello there", "tool_calls": []}
+
+
+@pytest.mark.asyncio
+async def test_chat_with_tools_tool_calls_only_content_none(monkeypatch):
+    """Tool-only response: content=None, tool_calls populated."""
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "arguments": '{"location": "Boston"}',
+            },
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_openai_tool_message_response(content=None, tool_calls=tool_calls),
+        )
+
+    _patch_httpx(monkeypatch, lmstudio_mod, handler)
+    p = LMStudioProvider()
+    out = await p.chat_with_tools(
+        [{"role": "user", "content": "weather in Boston"}],
+        tools=_FAKE_TOOLS,
+        model="x",
+    )
+    assert out == {"content": None, "tool_calls": tool_calls}
+
+
+@pytest.mark.asyncio
+async def test_chat_with_tools_both_content_and_tool_calls(monkeypatch):
+    """Some models return both narration content + a tool call. Both surface."""
+    tool_calls = [
+        {
+            "id": "call_2",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": "{}"},
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_openai_tool_message_response(
+                content="Let me check.", tool_calls=tool_calls,
+            ),
+        )
+
+    _patch_httpx(monkeypatch, lmstudio_mod, handler)
+    p = LMStudioProvider()
+    out = await p.chat_with_tools(
+        [{"role": "user", "content": "?"}],
+        tools=_FAKE_TOOLS,
+        model="x",
+    )
+    assert out == {"content": "Let me check.", "tool_calls": tool_calls}
+
+
+@pytest.mark.asyncio
+async def test_chat_with_tools_request_body_shape(monkeypatch):
+    """The tools list, tool_choice, model, temperature, max_tokens are all forwarded."""
+    captured: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_openai_tool_message_response(content="ok"))
+
+    _patch_httpx(monkeypatch, lmstudio_mod, handler)
+    p = LMStudioProvider()
+    await p.chat_with_tools(
+        [{"role": "user", "content": "hi"}],
+        tools=_FAKE_TOOLS,
+        model="qwen-coder",
+        temperature=0.2,
+        max_tokens=512,
+    )
+    body = captured["body"]
+    assert body["model"] == "qwen-coder"
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
+    assert body["stream"] is False
+    assert body["tools"] == _FAKE_TOOLS
+    assert body["tool_choice"] == "auto"
+    assert body["temperature"] == 0.2
+    assert body["max_tokens"] == 512
+
+
+@pytest.mark.asyncio
+async def test_chat_with_tools_tool_choice_required_forwarded(monkeypatch):
+    """tool_choice='required' is forwarded so callers can force a tool invocation."""
+    captured: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_openai_tool_message_response(content=None,
+                                                                      tool_calls=[]))
+
+    _patch_httpx(monkeypatch, lmstudio_mod, handler)
+    p = LMStudioProvider()
+    await p.chat_with_tools(
+        [{"role": "user", "content": "hi"}],
+        tools=_FAKE_TOOLS,
+        model="x",
+        tool_choice="required",
+    )
+    assert captured["body"]["tool_choice"] == "required"
+
+
+@pytest.mark.asyncio
+async def test_chat_with_tools_retries_on_connect_error(monkeypatch):
+    """The @with_retry decorator must wrap chat_with_tools — same as chat()."""
+    counter = {"calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        counter["calls"] += 1
+        if counter["calls"] == 1:
+            raise httpx.ConnectError("refused")
+        return httpx.Response(200, json=_openai_tool_message_response(content="ok"))
+
+    _patch_httpx(monkeypatch, lmstudio_mod, handler)
+    # Speed retries up so the test stays fast.
+    monkeypatch.setattr("enhancer.llm.resilience.asyncio.sleep",
+                        lambda _d: _noop_async())
+    p = LMStudioProvider()
+    out = await p.chat_with_tools(
+        [{"role": "user", "content": "hi"}],
+        tools=_FAKE_TOOLS,
+        model="x",
+    )
+    assert out == {"content": "ok", "tool_calls": []}
+    assert counter["calls"] == 2  # one retry happened
+
+
+async def _noop_async():
+    return None
