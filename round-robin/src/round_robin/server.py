@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .charlie.workspace import CharlieWorkspace, SandboxError, get_current as charlie_get_current
+from .code_review import review_with_dialogue
 from .config import STATE_FILE, STATIC_DIR, ensure_dirs
 from .discovery import get_all_peers
 from .health import probe
@@ -128,6 +129,15 @@ class SummarizeBody(BaseModel):
     # which the frontend rendered as the infamous "Object: Object: error" toast.
     model: str | None = None
     session_id: str | None = None  # historical session to re-summarize
+
+
+class ReviewRequest(BaseModel):
+    # Contract: matches what development.reviewers.RoundRobinReviewer POSTs.
+    # See `src/round_robin/code_review.py` for the response shape.
+    layer: str = Field(min_length=1)
+    purpose: str = Field(min_length=1)
+    files: dict[str, str] = Field(min_length=1)
+    model: str | None = None  # optional: override which LM Studio model the dialogue uses
 
 
 # ── App factory ─────────────────────────────────────────────────────────────
@@ -476,6 +486,45 @@ def create_app() -> FastAPI:
             status = 409 if specific and "still summarizing" in specific else 502
             raise HTTPException(status_code=status, detail=detail)
         return JSONResponse({"ok": True, "path": path})
+
+    # ── Code review (development integration) ─────────────────────────────
+
+    @app.post("/api/review")
+    async def review_layer(body: ReviewRequest) -> JSONResponse:
+        """Multi-LLM dialogue code review.
+
+        Consumed by ``development.reviewers.RoundRobinReviewer``. Returns a
+        verdict in the contract shape:
+
+            {"approved": bool, "issues": [str], "request_regenerate": bool,
+             "agents": {"agent_a_verdict": str, "agent_b_verdict": str,
+                        "consensus": str}}
+
+        On dialogue failure (LM Studio unreachable, model unloaded, …) we
+        return 503 with a string ``error`` so the dev-side reviewer can
+        treat it the same as 404 (deferred-mode fallback).
+        """
+        try:
+            verdict = await review_with_dialogue(
+                layer=body.layer,
+                purpose=body.purpose,
+                files=body.files,
+                lm_client=client,
+                model=body.model,
+            )
+        except Exception as exc:
+            logger.warning("review_with_dialogue failed: %s", exc)
+            monitor.record(
+                "review",
+                f"review failed: {exc}",
+                error_class=type(exc).__name__,
+                layer=body.layer,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"error": f"review unavailable: {type(exc).__name__}: {exc}"},
+            )
+        return JSONResponse(verdict)
 
     # ── WebSocket ──────────────────────────────────────────────────────────
 

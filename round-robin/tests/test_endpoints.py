@@ -78,3 +78,152 @@ def test_peers_endpoint_uses_get(client):
     # Wrong method should not 200.
     r = c.post("/api/peers")
     assert r.status_code in (404, 405)
+
+
+# ── /api/review (code-review dialogue, consumed by development) ─────────
+
+
+@pytest.fixture
+def review_client(tmp_path, monkeypatch):
+    """Same isolation as ``client`` but with the code-review dialogue stubbed.
+
+    Returns ``(test_client, set_responses)``: ``set_responses(list)`` swaps
+    the canned LM responses the dialogue will see. By default the patched
+    function returns a happy-path approve verdict so a test that doesn't
+    care about specific dialogue output still gets a 200.
+    """
+    fake_toml = tmp_path / "services.toml"
+    monkeypatch.setattr(discovery, "services_path", lambda: fake_toml)
+
+    state_file = tmp_path / "state.json"
+    config_file = tmp_path / "config.json"
+    monkeypatch.setattr(rr_config, "STATE_FILE", state_file)
+    monkeypatch.setattr(rr_config, "CONFIG_FILE", config_file)
+
+    import round_robin.server as srv
+    monkeypatch.setattr(srv, "STATE_FILE", state_file)
+    import round_robin.orchestrator as orch_mod
+    monkeypatch.setattr(orch_mod, "STATE_FILE", state_file)
+
+    # Patch the review function the route imports so we don't touch LM Studio.
+    state: dict = {"impl": None}
+
+    async def _fake_review(layer, purpose, files, *, lm_client=None, model=None,
+                            **_kwargs):
+        impl = state["impl"]
+        if impl is None:
+            return {
+                "approved": True,
+                "issues": [],
+                "request_regenerate": False,
+                "agents": {
+                    "agent_a_verdict": "stub-A",
+                    "agent_b_verdict": "stub-B",
+                    "consensus": "stubbed approve",
+                },
+            }
+        return await impl(layer, purpose, files, lm_client=lm_client, model=model)
+
+    monkeypatch.setattr(srv, "review_with_dialogue", _fake_review)
+
+    app = srv.create_app()
+
+    def set_impl(impl):
+        state["impl"] = impl
+
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c, set_impl
+
+
+def test_review_200_returns_contract_shape(review_client):
+    c, _ = review_client
+    r = c.post("/api/review", json={
+        "layer": "core",
+        "purpose": "do core things",
+        "files": {"a.py": "x = 1"},
+    })
+    assert r.status_code == 200
+    body = r.json()
+    # Contract keys (load-bearing for development.RoundRobinReviewer).
+    assert "approved" in body
+    assert "issues" in body
+    assert "request_regenerate" in body
+    # Round-robin extra metadata.
+    assert "agents" in body
+    assert "agent_a_verdict" in body["agents"]
+    assert "agent_b_verdict" in body["agents"]
+    assert "consensus" in body["agents"]
+
+
+def test_review_422_on_missing_layer(review_client):
+    c, _ = review_client
+    r = c.post("/api/review", json={
+        "purpose": "p", "files": {"a.py": "."},
+    })
+    assert r.status_code == 422
+
+
+def test_review_422_on_missing_purpose(review_client):
+    c, _ = review_client
+    r = c.post("/api/review", json={
+        "layer": "core", "files": {"a.py": "."},
+    })
+    assert r.status_code == 422
+
+
+def test_review_422_on_missing_files(review_client):
+    c, _ = review_client
+    r = c.post("/api/review", json={"layer": "core", "purpose": "p"})
+    assert r.status_code == 422
+
+
+def test_review_422_on_empty_files_dict(review_client):
+    c, _ = review_client
+    r = c.post("/api/review", json={
+        "layer": "core", "purpose": "p", "files": {},
+    })
+    assert r.status_code == 422
+
+
+def test_review_503_when_dialogue_raises(review_client):
+    c, set_impl = review_client
+
+    async def _boom(layer, purpose, files, **kwargs):
+        raise RuntimeError("LM Studio unreachable: simulated")
+
+    set_impl(_boom)
+    r = c.post("/api/review", json={
+        "layer": "core",
+        "purpose": "p",
+        "files": {"a.py": "x = 1"},
+    })
+    assert r.status_code == 503
+    body = r.json()
+    assert "error" in body
+    assert isinstance(body["error"], str)
+    assert "review unavailable" in body["error"]
+
+
+def test_review_response_always_has_three_contract_keys(review_client):
+    c, set_impl = review_client
+
+    async def _impl(layer, purpose, files, **kwargs):
+        return {
+            "approved": False,
+            "issues": ["i1"],
+            "request_regenerate": True,
+            "agents": {"agent_a_verdict": "a", "agent_b_verdict": "b",
+                        "consensus": "c"},
+        }
+
+    set_impl(_impl)
+    r = c.post("/api/review", json={
+        "layer": "core", "purpose": "p", "files": {"a.py": "."},
+    })
+    assert r.status_code == 200
+    body = r.json()
+    # All four keys present (3 contract + 1 metadata).
+    assert set(body.keys()) >= {"approved", "issues", "request_regenerate", "agents"}
+    assert body["approved"] is False
+    assert body["issues"] == ["i1"]
+    assert body["request_regenerate"] is True
