@@ -201,3 +201,73 @@ async def ensure_model_loaded(
             "Open LM Studio and verify the load."
         )
     return loaded[0].id
+
+
+# ── multi-host helpers (v1.2) ────────────────────────────────────────
+
+
+async def discover_chat_models_multihost(
+    hosts: list[str],
+    timeout: float = 5.0,
+) -> dict[str, list[ModelInfo]]:
+    """Concurrently discover chat-capable models across several LM Studio hosts.
+
+    ``hosts`` is a list of base URLs (e.g. ``"http://localhost:1234"``).
+    Returns a dict keyed by the input host string (preserved verbatim)
+    whose value is the same list :func:`discover_chat_models` would
+    return for that host (loaded-first, then alphabetical).
+
+    Errors are isolated per host: an unreachable host yields ``[]`` for
+    its key and logs a warning; other hosts succeed normally. The order
+    of keys in the returned dict matches the input ``hosts`` order.
+
+    Multi-host loading via the ``lms`` CLI is intentionally out of
+    scope — :func:`ensure_model_loaded` remains single-host only.
+    """
+    if not hosts:
+        return {}
+
+    coros = [discover_chat_models(h, timeout=timeout) for h in hosts]
+    results = await asyncio.gather(*coros, return_exceptions=True)
+
+    out: dict[str, list[ModelInfo]] = {}
+    for host, res in zip(hosts, results):
+        if isinstance(res, BaseException):
+            logger.warning("discover_chat_models_multihost: %s -> %s", host, res)
+            out[host] = []
+        else:
+            out[host] = res
+    return out
+
+
+async def pick_loaded_host(
+    hosts: list[str],
+    preferred_model: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Find a host with a chat-capable model already loaded.
+
+    Returns ``(host_url, model_id)``:
+
+    * If ``preferred_model`` is supplied, return the first host whose
+      models include it in the *loaded* state.
+    * Else return the first host (in input order) that has any loaded
+      chat model, paired with that model's id.
+    * Returns ``(None, None)`` if no host has a loaded chat model.
+
+    Hosts are queried via :func:`discover_chat_models_multihost`, so
+    unreachable hosts are silently skipped.
+    """
+    by_host = await discover_chat_models_multihost(hosts)
+
+    if preferred_model:
+        for host in hosts:  # preserve input order
+            for m in by_host.get(host, []):
+                if m.is_loaded and m.id == preferred_model:
+                    return host, m.id
+
+    for host in hosts:
+        for m in by_host.get(host, []):
+            if m.is_loaded:
+                return host, m.id
+
+    return None, None

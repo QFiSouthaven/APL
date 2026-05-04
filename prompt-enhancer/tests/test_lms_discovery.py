@@ -10,7 +10,9 @@ from enhancer.llm.lms_discovery import (
     ModelInfo,
     ModelLoadUnavailableError,
     discover_chat_models,
+    discover_chat_models_multihost,
     ensure_model_loaded,
+    pick_loaded_host,
 )
 
 
@@ -211,3 +213,233 @@ async def test_ensure_raises_when_load_succeeds_but_repoll_empty(monkeypatch):
 def test_modelinfo_is_loaded_property():
     assert ModelInfo(id="x", type="llm", state="loaded").is_loaded is True
     assert ModelInfo(id="x", type="llm", state="not-loaded").is_loaded is False
+
+
+# ── multi-host discovery ────────────────────────────────────────────
+
+
+def _patch_httpx_by_host(monkeypatch: pytest.MonkeyPatch, host_handlers: dict):
+    """Patch httpx so the request URL's authority routes to a per-host
+    handler. ``host_handlers`` maps a substring of the request URL
+    (e.g. ``"localhost:1234"`` or ``"192.168.1.50"``) to a handler
+    callable. A handler may raise to simulate connection failure.
+    """
+    real_client = httpx.AsyncClient
+
+    def make_router(handlers):
+        def router(request: httpx.Request) -> httpx.Response:
+            url_str = str(request.url)
+            for needle, handler in handlers.items():
+                if needle in url_str:
+                    return handler(request)
+            raise httpx.ConnectError(f"unrouted: {url_str}")
+        return router
+
+    transport = httpx.MockTransport(make_router(host_handlers))
+
+    def _factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(lms_discovery.httpx, "AsyncClient", _factory)
+
+
+@pytest.mark.asyncio
+async def test_multihost_aggregates_two_hosts(monkeypatch):
+    def host_a(request):
+        return httpx.Response(200, json={
+            "data": [
+                {"id": "alpha-loaded", "type": "llm", "state": "loaded"},
+                {"id": "alpha-spare", "type": "llm", "state": "not-loaded"},
+            ]
+        })
+
+    def host_b(request):
+        return httpx.Response(200, json={
+            "data": [
+                {"id": "beta-only", "type": "llm", "state": "not-loaded"},
+            ]
+        })
+
+    _patch_httpx_by_host(monkeypatch, {
+        "localhost:1234": host_a,
+        "192.168.1.50:1234": host_b,
+    })
+
+    out = await discover_chat_models_multihost([
+        "http://localhost:1234",
+        "http://192.168.1.50:1234",
+    ])
+
+    assert set(out.keys()) == {
+        "http://localhost:1234",
+        "http://192.168.1.50:1234",
+    }
+    a_ids = [m.id for m in out["http://localhost:1234"]]
+    b_ids = [m.id for m in out["http://192.168.1.50:1234"]]
+    # Loaded-first ordering preserved per-host.
+    assert a_ids == ["alpha-loaded", "alpha-spare"]
+    assert b_ids == ["beta-only"]
+
+
+@pytest.mark.asyncio
+async def test_multihost_one_host_down_returns_other_data(monkeypatch):
+    def host_a(request):
+        raise httpx.ConnectError("refused")
+
+    def host_b(request):
+        return httpx.Response(200, json={
+            "data": [{"id": "survivor", "type": "llm", "state": "loaded"}]
+        })
+
+    _patch_httpx_by_host(monkeypatch, {
+        "localhost:1234": host_a,
+        "192.168.1.50:1234": host_b,
+    })
+
+    out = await discover_chat_models_multihost([
+        "http://localhost:1234",
+        "http://192.168.1.50:1234",
+    ])
+
+    assert out["http://localhost:1234"] == []
+    assert [m.id for m in out["http://192.168.1.50:1234"]] == ["survivor"]
+
+
+@pytest.mark.asyncio
+async def test_multihost_empty_input_returns_empty_dict(monkeypatch):
+    out = await discover_chat_models_multihost([])
+    assert out == {}
+
+
+# ── pick_loaded_host ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_pick_loaded_host_honors_preferred(monkeypatch):
+    def host_a(request):
+        return httpx.Response(200, json={
+            "data": [{"id": "common-id", "type": "llm", "state": "loaded"}]
+        })
+
+    def host_b(request):
+        return httpx.Response(200, json={
+            "data": [{"id": "wanted", "type": "llm", "state": "loaded"}]
+        })
+
+    _patch_httpx_by_host(monkeypatch, {
+        "localhost:1234": host_a,
+        "192.168.1.50:1234": host_b,
+    })
+
+    host, model = await pick_loaded_host(
+        ["http://localhost:1234", "http://192.168.1.50:1234"],
+        preferred_model="wanted",
+    )
+    assert host == "http://192.168.1.50:1234"
+    assert model == "wanted"
+
+
+@pytest.mark.asyncio
+async def test_pick_loaded_host_falls_back_to_first_loaded(monkeypatch):
+    """No preferred → first host (in input order) with any loaded chat
+    model wins, even if a later host has more models."""
+    def host_a(request):
+        return httpx.Response(200, json={
+            "data": [{"id": "a-loaded", "type": "llm", "state": "loaded"}]
+        })
+
+    def host_b(request):
+        return httpx.Response(200, json={
+            "data": [
+                {"id": "b1-loaded", "type": "llm", "state": "loaded"},
+                {"id": "b2-loaded", "type": "llm", "state": "loaded"},
+            ]
+        })
+
+    _patch_httpx_by_host(monkeypatch, {
+        "localhost:1234": host_a,
+        "192.168.1.50:1234": host_b,
+    })
+
+    host, model = await pick_loaded_host([
+        "http://localhost:1234",
+        "http://192.168.1.50:1234",
+    ])
+    assert host == "http://localhost:1234"
+    assert model == "a-loaded"
+
+
+@pytest.mark.asyncio
+async def test_pick_loaded_host_skips_unloaded_hosts(monkeypatch):
+    """First host has only unloaded models; pick_loaded_host should move
+    on to the second host."""
+    def host_a(request):
+        return httpx.Response(200, json={
+            "data": [{"id": "cold", "type": "llm", "state": "not-loaded"}]
+        })
+
+    def host_b(request):
+        return httpx.Response(200, json={
+            "data": [{"id": "hot", "type": "llm", "state": "loaded"}]
+        })
+
+    _patch_httpx_by_host(monkeypatch, {
+        "localhost:1234": host_a,
+        "192.168.1.50:1234": host_b,
+    })
+
+    host, model = await pick_loaded_host([
+        "http://localhost:1234",
+        "http://192.168.1.50:1234",
+    ])
+    assert host == "http://192.168.1.50:1234"
+    assert model == "hot"
+
+
+@pytest.mark.asyncio
+async def test_pick_loaded_host_returns_none_when_nothing_loaded(monkeypatch):
+    def host_a(request):
+        return httpx.Response(200, json={
+            "data": [{"id": "cold-a", "type": "llm", "state": "not-loaded"}]
+        })
+
+    def host_b(request):
+        raise httpx.ConnectError("refused")
+
+    _patch_httpx_by_host(monkeypatch, {
+        "localhost:1234": host_a,
+        "192.168.1.50:1234": host_b,
+    })
+
+    host, model = await pick_loaded_host([
+        "http://localhost:1234",
+        "http://192.168.1.50:1234",
+    ])
+    assert host is None
+    assert model is None
+
+
+@pytest.mark.asyncio
+async def test_pick_loaded_host_preferred_not_loaded_falls_back(monkeypatch):
+    """Preferred model exists somewhere but is not loaded → fall back to
+    the first-loaded rule."""
+    def host_a(request):
+        return httpx.Response(200, json={
+            "data": [
+                {"id": "wanted", "type": "llm", "state": "not-loaded"},
+                {"id": "alt", "type": "llm", "state": "loaded"},
+            ]
+        })
+
+    _patch_httpx_by_host(monkeypatch, {
+        "localhost:1234": host_a,
+    })
+
+    host, model = await pick_loaded_host(
+        ["http://localhost:1234"],
+        preferred_model="wanted",
+    )
+    # Preferred not loaded → fallback returns the first loaded model.
+    assert host == "http://localhost:1234"
+    assert model == "alt"
