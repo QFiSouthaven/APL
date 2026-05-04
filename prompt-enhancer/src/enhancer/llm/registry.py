@@ -1,16 +1,25 @@
-"""Provider registry — discover by name, load by config.
+"""Provider + transform registry — discover by name, load by config.
 
-Future-proofing: third-party providers can register via the
-``enhancer.providers`` entry-point group in their own ``pyproject.toml``::
+Two entry-point groups are honored (v1.2: providers, v2.0: transforms):
+
+Providers (``enhancer.providers``)::
 
     [project.entry-points."enhancer.providers"]
     myllm = "my_pkg.provider:MyLLMProvider"
 
-For now we ship LM Studio with stubs for Ollama / OpenAI / Anthropic.
-:func:`get_provider` raises :class:`ValueError` with a helpful list
-when an unknown name is requested. Before that, it scans the
-``enhancer.providers`` entry-point group so out-of-tree plugins can
-register without modifying enhancer code.
+The class must subclass :class:`enhancer.llm.base.ChatProvider`.
+:func:`get_provider` consults this group before raising ``ValueError``.
+
+Transforms (``enhancer.transforms``)::
+
+    [project.entry-points."enhancer.transforms"]
+    my_xform = "my_pkg.transform:MyTransform"
+
+The class can either be callable (``cls(prompt, **context)``) or expose
+an ``.apply(prompt, **context)`` method. :func:`discover_transforms`
+returns a dict of registered classes; pipeline wiring of these plugins
+is a v2.x follow-up — v2.0 ships the discovery surface only so plugin
+authors can publish without waiting for the wiring layer.
 """
 
 from __future__ import annotations
@@ -106,3 +115,40 @@ def get_provider(settings: Settings) -> ChatProvider:
         f"Unknown provider: {settings.provider!r}. "
         f"Supported: lmstudio, ollama, openai, anthropic."
     )
+
+
+def discover_transforms() -> dict[str, type]:
+    """Return third-party transforms registered under ``enhancer.transforms``.
+
+    The returned dict maps the entry-point name to the loaded class. Each
+    entry is duck-checked: it must be callable OR expose an ``.apply``
+    attribute. Anything that fails the check is logged and skipped — never
+    raised.
+
+    Pipeline integration of these transforms is a v2.x follow-up; this
+    function is the discovery surface so plugin authors can publish a
+    package and verify it shows up here without waiting on enhancer's
+    own pipeline wiring.
+    """
+    found: dict[str, type] = {}
+    for ep in _iter_entry_points("enhancer.transforms"):
+        ep_name = getattr(ep, "name", None)
+        if not ep_name:
+            continue
+        try:
+            cls = ep.load()
+        except Exception as exc:
+            _log.warning(
+                "Failed to load entry-point %r in group 'enhancer.transforms': %s",
+                ep_name, exc,
+            )
+            continue
+        if not (callable(cls) or hasattr(cls, "apply")):
+            _log.warning(
+                "Entry-point %r in group 'enhancer.transforms' is neither "
+                "callable nor exposes .apply; skipping.",
+                ep_name,
+            )
+            continue
+        found[ep_name] = cls
+    return found

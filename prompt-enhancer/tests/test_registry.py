@@ -195,3 +195,104 @@ def test_iter_entry_points_falls_back_when_group_kwarg_unsupported(monkeypatch):
     monkeypatch.setattr(registry_module._im, "entry_points", fake_entry_points)
     out = registry_module._iter_entry_points("enhancer.providers")
     assert list(out) == sentinel
+
+
+# ── enhancer.transforms entry-point discovery (v2.0) ────────────────
+
+
+def _patch_transforms_entry_points(monkeypatch, eps):
+    """Make `_iter_entry_points('enhancer.transforms')` return ``eps``."""
+    monkeypatch.setattr(
+        registry_module, "_iter_entry_points",
+        lambda group: list(eps) if group == "enhancer.transforms" else [],
+    )
+
+
+class _CallableTransform:
+    """Plugin that's directly callable."""
+
+    def __call__(self, prompt, **context):  # pragma: no cover — unused
+        return prompt + " [callable]"
+
+
+class _ApplyTransform:
+    """Plugin that exposes .apply()."""
+
+    def apply(self, prompt, **context):  # pragma: no cover — unused
+        return prompt + " [apply]"
+
+
+class _BadTransform:
+    """Neither callable nor has .apply — should be skipped."""
+
+    pass
+
+
+def test_discover_transforms_returns_empty_when_nothing_registered(monkeypatch):
+    _patch_transforms_entry_points(monkeypatch, [])
+    assert registry_module.discover_transforms() == {}
+
+
+def test_discover_transforms_picks_up_callable(monkeypatch):
+    eps = [_FakeEntryPoint(name="my_xform", target=_CallableTransform)]
+    _patch_transforms_entry_points(monkeypatch, eps)
+    found = registry_module.discover_transforms()
+    assert "my_xform" in found
+    assert found["my_xform"] is _CallableTransform
+
+
+def test_discover_transforms_picks_up_apply_class(monkeypatch):
+    eps = [_FakeEntryPoint(name="my_apply", target=_ApplyTransform)]
+    _patch_transforms_entry_points(monkeypatch, eps)
+    found = registry_module.discover_transforms()
+    assert found == {"my_apply": _ApplyTransform}
+
+
+def test_discover_transforms_skips_invalid_target(monkeypatch, caplog):
+    """A target that is neither callable nor exposes .apply is skipped + logged."""
+    eps = [
+        _FakeEntryPoint(name="ok", target=_CallableTransform),
+        _FakeEntryPoint(name="bad", target=_BadTransform()),  # instance, not class
+    ]
+    _patch_transforms_entry_points(monkeypatch, eps)
+    with caplog.at_level("WARNING", logger="enhancer.llm.registry"):
+        found = registry_module.discover_transforms()
+    assert "ok" in found
+    assert "bad" not in found
+    assert any("bad" in rec.getMessage() for rec in caplog.records)
+
+
+def test_discover_transforms_skips_load_failure(monkeypatch, caplog):
+    """If ep.load() raises, log + skip rather than propagate."""
+
+    class _BoomEntryPoint:
+        name = "boom"
+
+        def load(self):
+            raise RuntimeError("import failed deep in plugin module")
+
+    _patch_transforms_entry_points(
+        monkeypatch,
+        [_BoomEntryPoint(), _FakeEntryPoint(name="ok", target=_CallableTransform)],
+    )
+    with caplog.at_level("WARNING", logger="enhancer.llm.registry"):
+        found = registry_module.discover_transforms()
+    assert "ok" in found
+    assert "boom" not in found
+    assert any("boom" in rec.getMessage() for rec in caplog.records)
+
+
+def test_discover_transforms_does_not_consume_providers_group(monkeypatch):
+    """Transforms discovery must NOT pick up entries in the providers group."""
+    # Make BOTH groups visible — but transforms-discovery should only see
+    # the transforms entry, not the provider one.
+    def selective(group):
+        if group == "enhancer.transforms":
+            return [_FakeEntryPoint(name="t1", target=_CallableTransform)]
+        if group == "enhancer.providers":
+            return [_FakeEntryPoint(name="p1", target=_StubProvider)]
+        return []
+
+    monkeypatch.setattr(registry_module, "_iter_entry_points", selective)
+    found = registry_module.discover_transforms()
+    assert list(found.keys()) == ["t1"]
