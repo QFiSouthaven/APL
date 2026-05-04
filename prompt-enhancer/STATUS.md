@@ -14,11 +14,13 @@ Enhancement Agent on every diff._
 | 4 — typer CLI | ✅ done | `version` `models` `enhance` `history` `ui` `batch` `compare` `export` + interactive disambiguation Q&A + `--skip-clarify` flag |
 | 5 — NiceGUI Desktop Studio | ✅ done | Studio (status strip + tabs + sliders + diff view + 6 components), History (with branch_tree row-detail), Analytics, Compare, Templates (8 seeds), Settings, disambiguation modal |
 | 6 — packaging | ✅ done | `dist/prompt-enhancer/prompt-enhancer.exe` rebuilt 2026-05-03 against Python 3.12 (117 MB, smoke=HTTP 200). Inno installer compiled to `release/prompt-enhancer-setup.exe` (38 MB, SHA256 `96a6ff106bc235f5ec3d678d1f00f1db834e510cfd54a0b86460db44e7d86198`) using Inno Setup 6.7.1. Includes the `tomli-w` runtime-dep fix from commit `20112ff`. |
-| 7 — verification | ✅ **LIVE-TESTED** | **85/85 unit tests green** (re-run 2026-05-03 after v1.0 discovery + resilience landed) + end-to-end run against gpt-oss-120b via LM Link confirmed below |
+| 7 — verification | ✅ **LIVE-TESTED** | **108/108 unit tests green** (re-run 2026-05-03 after v1.1 multi-backend + observability landed) + end-to-end run against gpt-oss-120b via LM Link confirmed below |
 | 8 — LM Studio discovery + auto-load | ✅ done | `src/enhancer/llm/lms_discovery.py` + 10 tests. Calls `/api/v0/models` for state-aware listing, falls back to `lms load` CLI shell-out when nothing is loaded, raises `ModelLoadUnavailableError` with operator instructions on failure. Wired into CLI `enhance`, NiceGUI startup, and the methodology-agent Stop hook. |
 | 9 — provider-layer resilience | ✅ done | `src/enhancer/llm/resilience.py` + 16 tests. `@with_retry` + `@with_stream_retry` decorators (exp-backoff, ±25 % jitter, 3 retries, honors `Retry-After` on 429); `ProviderHealth` circuit-breaker opens after 3 consecutive final failures, 30 s cooldown. Session counters surfaced to the Studio session drawer. Pipeline invariants in `core/pipeline.py` are NOT touched — wrap is at the provider layer. |
+| 10 — multi-backend providers (v1.1) | ✅ done | `src/enhancer/llm/{ollama,openai,anthropic}.py` real implementations replacing v1.0 NotImplementedError stubs. All three retry-wrapped. OpenAI uses `httpx` direct (skips SDK weight); Anthropic targets native `/v1/messages` shape with system-role lifting and typed-SSE parsing, also reaches LM Studio's compat endpoint via `ENHANCER_ANTHROPIC_BASE_URL`. 23 conformance tests in `tests/test_providers.py`. |
+| 11 — observability layer (v1.1) | ✅ done | `src/enhancer/observability/__init__.py` exposes `configure_logging()` (idempotent structlog setup, JSON for non-TTY, colored otherwise), `get_logger()` re-export, `trace_block(name, **attrs)` context manager, `traced(name=None)` decorator (auto-detects async). OTEL is strictly soft — gated on `OTEL_EXPORTER_OTLP_ENDPOINT`; opentelemetry-* libs never import unless that env var is set. |
 
-## Test status (re-run 2026-05-03, Python 3.12 dev venv, v1.0.0)
+## Test status (re-run 2026-05-03, Python 3.12 dev venv, v1.1.0)
 
 ```
 tests/test_api_rest.py .....                   5 passed   (REST endpoints)
@@ -32,9 +34,10 @@ tests/test_lms_discovery.py ..........        10 passed   (LM Studio model disco
 tests/test_migration.py ....                   4 passed   (JSONL → SQLite)
 tests/test_parsing.py ...........................  27 passed
 tests/test_pipeline_smoke.py ...               3 passed   (end-to-end via FakeChatProvider)
+tests/test_providers.py .......................  23 passed   (cross-provider conformance — v1.1)
 tests/test_resilience.py ................     16 passed   (retry + circuit breaker + stream wrap)
                                               ────────────
-                                              85 passed in 12.09s
+                                              108 passed in 12.09s
 ```
 
 **Build-env note:** dev venv was rebuilt fresh on 2026-05-02 against Python 3.12.0 (commit `3a6fa8e`). The previous venv ran on Python 3.13 — the bundled exe in `packaging/dist/` still carries 3.13 `.pyd` files and may need a rebuild before shipping.
