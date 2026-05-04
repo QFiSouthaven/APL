@@ -235,7 +235,10 @@ async def test_circuit_closes_after_cooldown():
     class P(_FakeProvider):
         def __init__(self):
             super().__init__()
-            self._health = ProviderHealth(threshold=2, cooldown_secs=0.001)
+            # Cooldown well above the Windows scheduler tick (~15.6ms) so
+            # the post-sleep assertion is not racing against timer
+            # resolution. The cost is ~50ms of test wall-clock.
+            self._health = ProviderHealth(threshold=2, cooldown_secs=0.02)
             self.fail_count = 0
 
         @with_retry(max_retries=0)
@@ -253,8 +256,8 @@ async def test_circuit_closes_after_cooldown():
             await p.chat()
     assert p._health.is_open
 
-    # Wait past cooldown.
-    time.sleep(0.005)
+    # Wait well past cooldown so the assertion is not flaky on Windows.
+    time.sleep(0.05)
     assert not p._health.is_open
 
     # Probe call succeeds, circuit closes.
