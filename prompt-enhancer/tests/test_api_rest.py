@@ -72,7 +72,7 @@ def test_peers_endpoint(fake_app):
     assert "services" in body
     assert "prompt_enhancer" in body["services"]
     assert "round_robin" in body["services"]
-    assert "interpreter" in body["services"]
+    assert "development" in body["services"]
 
 
 def test_enhance_returns_envelope_with_real_scores(fake_app, tmp_path, monkeypatch):

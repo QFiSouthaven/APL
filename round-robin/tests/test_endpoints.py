@@ -2,7 +2,7 @@
 
 Covers ``GET /api/peers`` and the discovery-shaped fields added to
 ``GET /api/health`` in v1.2.0. These are the surfaces sibling products
-(prompt-enhancer, interpreter, swarm-loop) call for cross-product
+(prompt-enhancer, development, swarm-loop) call for cross-product
 service introspection.
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ def test_peers_returns_defaults_with_no_file(client):
     assert "services" in body
     assert body["services"]["prompt_enhancer"] == "http://127.0.0.1:8765"
     assert body["services"]["round_robin"] == "http://127.0.0.1:8766"
-    assert body["services"]["interpreter"] == "http://127.0.0.1:8767"
+    assert body["services"]["development"] == "http://127.0.0.1:8767"
 
 
 def test_peers_reflects_toml_overrides(client):

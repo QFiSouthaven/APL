@@ -12,7 +12,7 @@ each other) and orchestrated boot (`lab/launch.py`).
 |------|-----------|-------------|
 | `prompt-enhancer/` | Multi-pass AI prompt enhancer with NiceGUI desktop studio. LM Studio first, providers pluggable (Ollama, OpenAI, Anthropic). | `8765` |
 | `round-robin/` | Two-LLM dialogue desktop app over LM Studio LM Link, with optional Charlie sandbox implementer. | `8766` |
-| `right-pipe/` | (Reserved — empty placeholder.) | `8767` |
+| `development/` | Local-LLM code-and-stack-app builder. Orchestrator + MessageBoard + Code LLM stages. (Foundation in v2.1; full stack-app generation in v2.x.) | `8767` |
 | `hardware-info/` | Hardware-state archive for machine `m5`. Not a service. | n/a |
 
 Each component is independently runnable. The umbrella adds:

@@ -33,7 +33,7 @@ else:  # pragma: no cover — py3.10 fallback
 DEFAULTS: dict[str, str] = {
     "prompt_enhancer": "http://127.0.0.1:8765",
     "round_robin": "http://127.0.0.1:8766",
-    "interpreter": "http://127.0.0.1:8767",
+    "development": "http://127.0.0.1:8767",
 }
 
 

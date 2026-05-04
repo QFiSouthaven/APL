@@ -25,7 +25,7 @@ def _isolate_services_path(tmp_path, monkeypatch):
 def test_defaults_when_no_file(_isolate_services_path):
     assert discovery.get_peer_url("prompt_enhancer") == "http://127.0.0.1:8765"
     assert discovery.get_peer_url("round_robin") == "http://127.0.0.1:8766"
-    assert discovery.get_peer_url("interpreter") == "http://127.0.0.1:8767"
+    assert discovery.get_peer_url("development") == "http://127.0.0.1:8767"
 
 
 def test_unknown_peer_with_default(_isolate_services_path):
@@ -55,7 +55,7 @@ def test_overrides_from_toml(_isolate_services_path: Path):
         == "http://192.168.1.51:8766"
     )
     # Unspecified peers fall back to defaults
-    assert discovery.get_peer_url("interpreter") == "http://127.0.0.1:8767"
+    assert discovery.get_peer_url("development") == "http://127.0.0.1:8767"
 
 
 def test_get_all_peers_merges_overrides(_isolate_services_path: Path):
@@ -66,7 +66,7 @@ def test_get_all_peers_merges_overrides(_isolate_services_path: Path):
     peers = discovery.get_all_peers()
     assert peers["prompt_enhancer"] == "http://override:1"
     assert peers["round_robin"] == "http://127.0.0.1:8766"
-    assert peers["interpreter"] == "http://127.0.0.1:8767"
+    assert peers["development"] == "http://127.0.0.1:8767"
 
 
 def test_get_all_peers_includes_all_defaults_when_no_file(_isolate_services_path):
@@ -74,7 +74,7 @@ def test_get_all_peers_includes_all_defaults_when_no_file(_isolate_services_path
     assert peers == {
         "prompt_enhancer": "http://127.0.0.1:8765",
         "round_robin": "http://127.0.0.1:8766",
-        "interpreter": "http://127.0.0.1:8767",
+        "development": "http://127.0.0.1:8767",
     }
 
 
@@ -97,5 +97,5 @@ def test_defaults_match_prompt_enhancer():
     assert discovery.DEFAULTS == {
         "prompt_enhancer": "http://127.0.0.1:8765",
         "round_robin": "http://127.0.0.1:8766",
-        "interpreter": "http://127.0.0.1:8767",
+        "development": "http://127.0.0.1:8767",
     }

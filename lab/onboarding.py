@@ -25,7 +25,7 @@ from platformdirs import user_config_dir
 DEFAULTS = {
     "prompt_enhancer": "http://127.0.0.1:8765",
     "round_robin": "http://127.0.0.1:8766",
-    "interpreter": "http://127.0.0.1:8767",
+    "development": "http://127.0.0.1:8767",
 }
 
 _TEMPLATE = """# Shared service discovery for the APL umbrella.

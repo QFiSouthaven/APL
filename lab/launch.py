@@ -49,12 +49,17 @@ COMPONENTS: dict[str, dict] = {
         "command": [".venv/Scripts/python.exe", "app.py"],
         "health_path": "/api/health",
     },
+    "development": {
+        "cwd": REPO_ROOT / "development",
+        "command": [".venv/Scripts/python.exe", "app.py"],
+        "health_path": "/api/health",
+    },
 }
 
 DEFAULT_URLS = {
     "prompt_enhancer": "http://127.0.0.1:8765",
     "round_robin": "http://127.0.0.1:8766",
-    "interpreter": "http://127.0.0.1:8767",
+    "development": "http://127.0.0.1:8767",
 }
 
 HEALTH_TIMEOUT = 30.0  # seconds to wait for a single component to come up

@@ -88,7 +88,7 @@ def run() -> None:
     s = load()
 
     # Mount the inter-product REST API onto NiceGUI's FastAPI app so
-    # sibling products (round-robin, interpreter, swarm-loop) can hit
+    # sibling products (round-robin, development, swarm-loop) can hit
     # /api/enhance, /api/health, /api/peers without importing this pkg.
     nicegui_app.include_router(integration_router)
 

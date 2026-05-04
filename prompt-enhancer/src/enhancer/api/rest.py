@@ -2,7 +2,7 @@
 
 Mounts ``POST /api/enhance``, ``GET /api/health``, ``GET /api/peers``
 onto whichever FastAPI app the NiceGUI Studio runs under. Sibling
-products (round-robin, interpreter, swarm-loop) call these without
+products (round-robin, development, swarm-loop) call these without
 importing this package.
 
 The shared envelope is documented at ``docs/INTEGRATION.md``. Schema
