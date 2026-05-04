@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>development — APL</title>
+    <style>
+        :root { color-scheme: dark light; }
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+            line-height: 1.5;
+            padding: 2rem;
+            max-width: 880px;
+            margin-inline: auto;
+        }
+        h1 { margin-top: 0; }
+        textarea, input[type=text] {
+            width: 100%;
+            box-sizing: border-box;
+            font: inherit;
+            padding: 0.5rem;
+            margin-block: 0.25rem 1rem;
+        }
+        textarea { min-height: 6rem; resize: vertical; }
+        button {
+            font: inherit;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+        }
+        pre {
+            background: #1116;
+            padding: 1rem;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .row { display: flex; gap: 0.5rem; align-items: center; }
+        .muted { opacity: 0.7; font-size: 0.9em; }
+        .err { color: #c33; }
+    </style>
+</head>
+<body>
+    <h1>development</h1>
+    <p class="muted">
+        Local LLM-driven app builder. Submit a goal; the Architect stage
+        produces a structured stack plan via LM Studio.
+    </p>
+
+    <label for="goal"><strong>Goal</strong></label>
+    <textarea id="goal" placeholder="e.g. A simple notes app with tags, persisted to SQLite, served by FastAPI."></textarea>
+
+    <div class="row">
+        <label for="stack-hint" class="muted">Stack hint</label>
+        <input id="stack-hint" type="text" placeholder="e.g. fastapi+sqlite+htmx" />
+    </div>
+    <div class="row">
+        <label for="target-lang" class="muted">Target language</label>
+        <input id="target-lang" type="text" placeholder="e.g. python" />
+    </div>
+
+    <button id="submit">Build</button>
+    <span id="status" class="muted"></span>
+
+    <h2>Result</h2>
+    <pre id="result">(none yet)</pre>
+
+    <script>
+        const $ = (id) => document.getElementById(id);
+
+        $("submit").addEventListener("click", async () => {
+            const body = {
+                goal: $("goal").value.trim(),
+                stack_hint: $("stack-hint").value.trim() || null,
+                target_lang: $("target-lang").value.trim() || null,
+                constraints: {},
+            };
+            if (!body.goal) {
+                $("status").textContent = "Please enter a goal.";
+                return;
+            }
+            $("status").textContent = "Building...";
+            $("result").textContent = "(running)";
+            try {
+                const r = await fetch("/api/build", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify(body),
+                });
+                const data = await r.json();
+                $("status").textContent = r.ok ? "Done." : "Failed.";
+                $("result").textContent = JSON.stringify(data, null, 2);
+            } catch (err) {
+                $("status").innerHTML = '<span class="err">Network error.</span>';
+                $("result").textContent = String(err);
+            }
+        });
+    </script>
+</body>
+</html>
