@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from typing import TYPE_CHECKING
+
 from ..llm.base import ChatProvider
 from ..persistence.runs import RunRecord
 from .budgeting import (
@@ -58,6 +60,10 @@ from .transforms import (
     PERSONA_SYSTEM,
     SOT_SYSTEM_PROMPT,
 )
+
+if TYPE_CHECKING:
+    from .pipeline_graph import PipelineGraph
+    from ..mcp.invoker import MCPToolInvoker
 
 logger = logging.getLogger("enhancer.core.pipeline")
 
@@ -187,6 +193,10 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
     request_timeout: float = 600.0,
     idle_timeout: float = 120.0,
     pending_disambig: dict[str, dict] | None = None,
+    pipeline_graph: "PipelineGraph | None" = None,
+    mcp_invoker: "MCPToolInvoker | None" = None,
+    mcp_pre_pass1: list[dict] | None = None,
+    mcp_pre_pass3: list[dict] | None = None,
 ) -> PipelineResult:
     """The 4-pass enhancer.
 
@@ -197,6 +207,23 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
        awaited before Magnitude / SoT begin.
     3. Every ``provider.chat_stream`` call carries ``idle_timeout``.
 
+    v2.0.1 optional parameters (all default ``None`` and preserve every
+    pre-v2.0.1 behavior when omitted):
+
+    * ``pipeline_graph`` — if supplied, validated at call time. A graph
+      that violates any of the three invariants raises
+      :class:`PipelineGraphValidationError` BEFORE any LLM call. Once
+      validated, the graph is informational in v2.0.1 (the pipeline still
+      runs the canonical 4-pass order). True graph-driven scheduling is
+      a v2.0.2+ refinement; we land the validation guard first.
+    * ``mcp_invoker`` + ``mcp_pre_pass1`` / ``mcp_pre_pass3`` — when both
+      the invoker and at least one hook list are supplied, the invoker
+      runs the listed tool calls BEFORE Pass 1 (intent enrichment) and
+      BEFORE Pass 3 (rewrite tools). Each hook is a dict with keys
+      ``server``, ``tool``, ``args``. Tool results are concatenated and
+      injected into the user message as ``[MCP CONTEXT]...[END MCP CONTEXT]``
+      so Pass 1/3 can use the enrichment without protocol awareness.
+
     Returns a :class:`PipelineResult` dataclass. Caller is responsible
     for persisting it via ``persistence.runs.save(...)`` if desired.
     """
@@ -205,6 +232,18 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
     scorer_model = opts.scorer_model or model
     temperature = opts.temperature
     max_tokens_scale = opts.max_tokens_scale
+
+    # v2.0.1: pipeline_graph validation — fail fast on misconfig before
+    # any LLM call. The validator reproduces the three concurrency
+    # invariants statically; a config that would violate them at runtime
+    # is rejected here. See ``core/pipeline_graph.py:validate``.
+    if pipeline_graph is not None:
+        from .pipeline_graph import validate as _validate_graph
+        _validate_graph(pipeline_graph)
+        await _emit(on_event, EventType.AGENT_STEP,
+                    step="pipeline_graph_loaded",
+                    detail=f"validated {len(pipeline_graph.nodes)} pass nodes "
+                           f"(schema v{pipeline_graph.version})")
 
     # ── Branch initialization (optional) ─────────────────────────────
     # When ``parent_run_id`` is set, load the parent run's stored pass
@@ -326,6 +365,15 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
         p1_user = _wrap_with_session(
             session_context, prompt, char_budget // 2, label="prompt",
         )
+        # v2.0.1: optional MCP pre-Pass-1 enrichment.
+        if mcp_invoker is not None and mcp_pre_pass1:
+            mcp_enrichment = await _run_mcp_hooks(
+                mcp_invoker, mcp_pre_pass1, on_event=on_event,
+            )
+            if mcp_enrichment:
+                p1_user = (
+                    f"{p1_user}\n\n[MCP CONTEXT]\n{mcp_enrichment}\n[END MCP CONTEXT]"
+                )
         pass1_chunks: list[str] = []
         try:
             async for tok in provider.chat_stream(
@@ -494,6 +542,16 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
                 + "\n[END SESSION CONTEXT]\n"
             )
 
+        # v2.0.1: optional MCP pre-Pass-3 enrichment (rewrite tools).
+        if mcp_invoker is not None and mcp_pre_pass3:
+            mcp_enrichment = await _run_mcp_hooks(
+                mcp_invoker, mcp_pre_pass3, on_event=on_event,
+            )
+            if mcp_enrichment:
+                pass3_user_parts.append(
+                    f"[MCP CONTEXT]\n{mcp_enrichment}\n[END MCP CONTEXT]\n"
+                )
+
         pass3_user = "\n".join(pass3_user_parts)
 
         enhanced_chunks: list[str] = []
@@ -528,6 +586,22 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
                     duration_ms=int((t3 - t2_effective) * 1000))
 
     # ── Pass 4 — Quality Scoring (background task) ──────────────────
+    # v2.0.1: model_router auto-selection. If the user didn't explicitly
+    # set opts.scorer_model, ask the router to pick a task-aware scorer
+    # from the available models. Best-effort: any failure (LM Studio
+    # unreachable, no models loaded, router error) silently keeps the
+    # early default of `model`.
+    if not opts.scorer_model:
+        try:
+            from ..llm.model_router import select_scorer
+            available = await provider.list_models()
+            if available:
+                routed = select_scorer(task_type, available, preferred=None)
+                if routed:
+                    scorer_model = routed
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.debug("model_router fallback (%s); keeping %r", exc, scorer_model)
+
     pass4_task: asyncio.Task | None = None
     pass4_text = ""
     scores: dict[str, int] = dict(P4_DEFAULTS)
@@ -733,6 +807,50 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
 
 
 # ── helpers ─────────────────────────────────────────────────────────
+
+async def _run_mcp_hooks(
+    invoker: "MCPToolInvoker",
+    hooks: list[dict],
+    *,
+    on_event: OnEvent | None,
+) -> str:
+    """Run a list of MCP tool calls via ``invoker`` and concatenate results.
+
+    Each ``hook`` is a dict with keys ``server`` (str), ``tool`` (str),
+    ``args`` (dict). The invoker emits ``MCP_TOOL_INVOKED`` /
+    ``MCP_TOOL_RESULT`` events for each call so the UI can surface
+    progress without the pipeline knowing the protocol.
+
+    Failures are swallowed (logged at WARNING) so a misbehaving MCP
+    server can't break a pipeline run. The function never raises.
+    Returns the concatenated tool-result text or empty string.
+    """
+    if not hooks:
+        return ""
+
+    chunks: list[str] = []
+    for hook in hooks:
+        server = hook.get("server")
+        tool = hook.get("tool")
+        args = hook.get("args") or {}
+        if not (server and tool):
+            logger.warning("Skipping malformed MCP hook %r — needs server+tool", hook)
+            continue
+        try:
+            result = await invoker.invoke_with_events(
+                server=server, tool=tool, args=args, on_event=on_event,
+            )
+        except Exception as exc:  # noqa: BLE001 — never break the pipeline
+            logger.warning("MCP hook %s/%s failed: %s", server, tool, exc)
+            continue
+        # Result shape varies by tool; render best-effort.
+        if isinstance(result, dict):
+            content = result.get("content") or result.get("result") or result
+        else:
+            content = result
+        chunks.append(f"--- {server}/{tool} ---\n{content}")
+    return "\n\n".join(chunks)
+
 
 def _wrap_with_session(session_context: str, prompt: str,
                        budget: int, label: str) -> str:
