@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any, ClassVar
 
+from .._json_utils import parse_llm_json
 from ..types import ArchitectFailedError, BuildRequest
 from .base import Stage
 
@@ -58,7 +58,7 @@ class ArchitectStage(Stage):
             {"role": "user", "content": user_prompt},
         ]
         raw = await self._llm.chat(messages, temperature=0.2, max_tokens=2048)
-        plan = _try_parse_json(raw)
+        plan = parse_llm_json(raw)
 
         # One retry on parse failure, with a tighter reminder.
         if plan is None:
@@ -74,7 +74,7 @@ class ArchitectStage(Stage):
                 {"role": "user", "content": RETRY_REMINDER},
             ]
             raw = await self._llm.chat(messages, temperature=0.0, max_tokens=2048)
-            plan = _try_parse_json(raw)
+            plan = parse_llm_json(raw)
 
         if plan is None:
             raise ArchitectFailedError(
@@ -104,52 +104,10 @@ def _build_user_prompt(request: BuildRequest) -> str:
     return "\n".join(parts)
 
 
-_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.MULTILINE)
-
-
-def _try_parse_json(raw: str) -> dict[str, Any] | None:
-    """Best-effort JSON extraction.
-
-    Handles three common LLM tics:
-      1. Plain JSON — parse directly.
-      2. ```json fenced — strip fences and retry.
-      3. Prose-wrapped JSON — find the first ``{`` … last ``}`` and try
-         that substring.
-
-    Returns the parsed dict, or ``None`` if nothing parses cleanly.
-    """
-    if not raw:
-        return None
-    text = raw.strip()
-
-    # Direct parse.
-    try:
-        parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else None
-    except (TypeError, ValueError):
-        pass
-
-    # Strip code fences and retry.
-    stripped = _FENCE_RE.sub("", text).strip()
-    if stripped != text:
-        try:
-            parsed = json.loads(stripped)
-            return parsed if isinstance(parsed, dict) else None
-        except (TypeError, ValueError):
-            pass
-
-    # First ``{`` to last ``}`` substring.
-    first = text.find("{")
-    last = text.rfind("}")
-    if first != -1 and last != -1 and last > first:
-        candidate = text[first : last + 1]
-        try:
-            parsed = json.loads(candidate)
-            return parsed if isinstance(parsed, dict) else None
-        except (TypeError, ValueError):
-            pass
-
-    return None
+# Back-compat alias — kept so any code or test importing
+# ``_try_parse_json`` from this module continues to work after the
+# refactor that moved the parser into ``development._json_utils``.
+_try_parse_json = parse_llm_json
 
 
 def _normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:

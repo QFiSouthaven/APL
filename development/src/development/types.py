@@ -71,6 +71,7 @@ class StageEvent:
 # trivially serializable without the round-tripping ceremony.
 BUILD_STARTED = "BUILD_STARTED"
 STAGE_STARTED = "STAGE_STARTED"
+STAGE_PROGRESS = "STAGE_PROGRESS"
 STAGE_DONE = "STAGE_DONE"
 STAGE_FAILED = "STAGE_FAILED"
 BUILD_DONE = "BUILD_DONE"
@@ -86,4 +87,19 @@ class ArchitectFailedError(RuntimeError):
 
     def __init__(self, message: str, *, raw_response: str = "") -> None:
         super().__init__(message)
+        self.raw_response = raw_response
+
+
+class LayerGenerationError(RuntimeError):
+    """Raised by a layer generator when the LLM never produces parseable JSON.
+
+    The generator tries once, then retries once at temperature=0.0 with a
+    "valid JSON only" reminder. If both fail, this is raised carrying the
+    layer name and the last raw response so the Coder can decide whether
+    to skip the layer or fail the whole build.
+    """
+
+    def __init__(self, layer_name: str, raw_response: str = "") -> None:
+        super().__init__(f"Layer {layer_name!r} produced unparseable JSON after retry.")
+        self.layer_name = layer_name
         self.raw_response = raw_response
