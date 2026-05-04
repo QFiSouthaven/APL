@@ -57,8 +57,8 @@ dev = [
 enhancer = "enhancer.cli.main:app"
 
 [project.urls]
-Homepage = "https://github.com/halkive/prompt-enhancer"
-Issues = "https://github.com/halkive/prompt-enhancer/issues"
+Homepage = "https://github.com/QFiSouthaven/APL"
+Issues = "https://github.com/QFiSouthaven/APL/issues"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

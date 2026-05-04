@@ -30,7 +30,7 @@ enhancer ui                                # Desktop Studio (NiceGUI)
 ```
 
 For non-Python users: `prompt-enhancer-setup.exe` from
-[Releases](https://github.com/halkive/prompt-enhancer/releases).
+[Releases](https://github.com/QFiSouthaven/APL/releases).
 
 ## Build phases
 

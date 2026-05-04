@@ -134,5 +134,5 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 - Sessions persistence requires SQLite (`enhancer.db`); no remote sync.
 - Settings UI is read-only — env vars are the v0.1 control surface.
 
-[Unreleased]: https://github.com/halkive/prompt-enhancer/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/halkive/prompt-enhancer/releases/tag/v0.1.0
+[Unreleased]: https://github.com/QFiSouthaven/APL/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/QFiSouthaven/APL/releases/tag/v0.1.0

@@ -4,7 +4,7 @@ Wire this up against the Ollama HTTP API at ``localhost:11434``. The
 Ollama OpenAI-compat endpoint at ``/v1/chat/completions`` makes the
 implementation almost identical to :class:`LMStudioProvider`.
 
-Track at https://github.com/halkive/prompt-enhancer/issues for v1.1.
+Track at https://github.com/QFiSouthaven/APL/issues for v1.1.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from .resilience import ProviderHealth
 
 _INSTALL_HINT = (
     "Ollama provider is not implemented in v1.0. "
-    "Track v1.1 at https://github.com/halkive/prompt-enhancer/issues. "
+    "Track v1.1 at https://github.com/QFiSouthaven/APL/issues. "
     "Until then, use the LM Studio provider or contribute the implementation."
 )
 
