@@ -3,98 +3,577 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>development — APL</title>
+    <title>APL Development — Studio</title>
     <style>
-        :root { color-scheme: dark light; }
+        :root {
+            --bg: #0f1115;
+            --bg-elev: #161922;
+            --bg-elev-2: #1c202b;
+            --border: #2a2f3d;
+            --text: #e6e9ef;
+            --text-dim: #8b93a7;
+            --accent: #5aa9ff;
+            --green: #3ddc84;
+            --red: #ff6168;
+            --gray: #6b7280;
+            --light-gray: #9aa3b2;
+            --yellow: #f5b042;
+            color-scheme: dark;
+        }
+        * { box-sizing: border-box; }
         body {
             margin: 0;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
             line-height: 1.5;
-            padding: 2rem;
-            max-width: 880px;
+        }
+        header {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 1.15rem;
+            font-weight: 600;
+        }
+        header h1 .accent { color: var(--accent); }
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            background: var(--bg-elev-2);
+            color: var(--text-dim);
+            border: 1px solid var(--border);
+        }
+        #peers-strip {
+            display: inline-flex;
+            gap: 0.75rem;
+            font-size: 0.8rem;
+            align-items: center;
+        }
+        .peer { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--text-dim); }
+        .peer .dot {
+            display: inline-block;
+            width: 0.55rem;
+            height: 0.55rem;
+            border-radius: 50%;
+            background: var(--gray);
+        }
+        .peer.up .dot { background: var(--green); }
+        .peer.down .dot { background: var(--red); }
+
+        main {
+            display: grid;
+            grid-template-columns: 1fr 1.4fr;
+            gap: 1.25rem;
+            padding: 1.25rem 1.5rem;
+            max-width: 1500px;
             margin-inline: auto;
         }
-        h1 { margin-top: 0; }
-        textarea, input[type=text] {
-            width: 100%;
-            box-sizing: border-box;
-            font: inherit;
-            padding: 0.5rem;
-            margin-block: 0.25rem 1rem;
+        @media (max-width: 900px) {
+            main { grid-template-columns: 1fr; }
         }
-        textarea { min-height: 6rem; resize: vertical; }
-        button {
+
+        .panel {
+            background: var(--bg-elev);
+            border: 1px solid var(--border);
+            border-radius: 0.6rem;
+            padding: 1rem 1.1rem;
+        }
+        .panel h2 {
+            margin: 0 0 0.75rem;
+            font-size: 0.95rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-dim);
+            font-weight: 600;
+        }
+        label { display: block; font-size: 0.85rem; color: var(--text-dim); margin-top: 0.6rem; }
+        textarea, input[type=text], select {
+            width: 100%;
+            background: var(--bg-elev-2);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 0.35rem;
+            padding: 0.5rem 0.6rem;
             font: inherit;
-            padding: 0.5rem 1rem;
+            margin-top: 0.25rem;
+        }
+        textarea { resize: vertical; min-height: 5.5rem; }
+        textarea:focus, input:focus, select:focus {
+            outline: 2px solid var(--accent);
+            outline-offset: 0;
+            border-color: transparent;
+        }
+        button {
+            background: var(--accent);
+            color: #04111f;
+            border: 0;
+            border-radius: 0.35rem;
+            padding: 0.55rem 1rem;
+            font: inherit;
+            font-weight: 600;
             cursor: pointer;
+            margin-top: 1rem;
+        }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        button:hover:not(:disabled) { filter: brightness(1.1); }
+
+        #status {
+            margin-top: 0.5rem;
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            min-height: 1.2em;
+        }
+        #status.err { color: var(--red); }
+
+        #event-log {
+            height: 22rem;
+            overflow-y: auto;
+            background: var(--bg-elev-2);
+            border: 1px solid var(--border);
+            border-radius: 0.4rem;
+            padding: 0.5rem;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            font-size: 0.8rem;
+        }
+        .event {
+            display: flex;
+            gap: 0.5rem;
+            align-items: baseline;
+            padding: 0.25rem 0.4rem;
+            border-radius: 0.25rem;
+            margin-bottom: 0.15rem;
+        }
+        .event .ts { color: var(--text-dim); flex-shrink: 0; min-width: 5.5rem; }
+        .event .kind {
+            display: inline-block;
+            padding: 0.1rem 0.45rem;
+            border-radius: 0.2rem;
+            font-weight: 600;
+            font-size: 0.72rem;
+            min-width: 8rem;
+            text-align: center;
+            flex-shrink: 0;
+            border: 1px solid transparent;
+        }
+        .event .summary { flex: 1; color: var(--text); word-break: break-word; }
+        .kind-BUILD_STARTED { background: rgba(90,169,255,0.15); color: var(--accent); border-color: rgba(90,169,255,0.4); }
+        .kind-STAGE_STARTED { background: rgba(107,114,128,0.2); color: var(--text); }
+        .kind-STAGE_PROGRESS { background: rgba(154,163,178,0.15); color: var(--light-gray); }
+        .kind-STAGE_DONE { background: rgba(61,220,132,0.15); color: var(--green); border-color: rgba(61,220,132,0.4); }
+        .kind-STAGE_FAILED { background: rgba(255,97,104,0.15); color: var(--red); border-color: rgba(255,97,104,0.4); }
+        .kind-BUILD_FAILED { background: rgba(255,97,104,0.2); color: var(--red); border-color: rgba(255,97,104,0.5); font-weight: 700; }
+        .kind-BUILD_DONE   { background: rgba(61,220,132,0.2); color: var(--green); border-color: rgba(61,220,132,0.5); font-weight: 700; }
+
+        #event-controls {
+            margin-bottom: 0.5rem;
+            font-size: 0.78rem;
+            color: var(--text-dim);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #conn-state {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+        }
+        #conn-state.live   { color: var(--green); }
+        #conn-state.retry  { color: var(--yellow); }
+        #conn-state.dead   { color: var(--red); }
+        #scroll-pause {
+            background: transparent;
+            color: var(--text-dim);
+            border: 1px solid var(--border);
+            margin: 0;
+            padding: 0.25rem 0.6rem;
+            font-size: 0.75rem;
+            border-radius: 0.25rem;
+        }
+
+        #result-panel {
+            margin-top: 1rem;
+            display: none;
+        }
+        #result-panel.shown { display: block; }
+        #result-panel details {
+            background: var(--bg-elev-2);
+            border: 1px solid var(--border);
+            border-radius: 0.4rem;
+            padding: 0.5rem 0.7rem;
+            margin-bottom: 0.5rem;
+        }
+        #result-panel summary {
+            cursor: pointer;
+            font-weight: 600;
+            color: var(--accent);
         }
         pre {
-            background: #1116;
-            padding: 1rem;
+            margin: 0.5rem 0 0;
+            background: var(--bg);
+            color: var(--text);
+            padding: 0.6rem 0.8rem;
+            border-radius: 0.35rem;
             overflow-x: auto;
             white-space: pre-wrap;
             word-break: break-word;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            font-size: 0.78rem;
         }
-        .row { display: flex; gap: 0.5rem; align-items: center; }
-        .muted { opacity: 0.7; font-size: 0.9em; }
-        .err { color: #c33; }
+        .artifact { padding: 0.4rem 0; border-bottom: 1px dashed var(--border); }
+        .artifact:last-child { border-bottom: 0; }
+        .artifact code { color: var(--accent); }
+        .meta-row {
+            display: flex;
+            gap: 1.5rem;
+            padding: 0.5rem 0;
+            font-size: 0.85rem;
+            color: var(--text-dim);
+        }
+        .meta-row b { color: var(--text); }
     </style>
 </head>
 <body>
-    <h1>development</h1>
-    <p class="muted">
-        Local LLM-driven app builder. Submit a goal; the Architect stage
-        produces a structured stack plan via LM Studio.
-    </p>
+    <header>
+        <h1><span class="accent">APL</span> Development <span class="badge" id="version-badge">v?</span> <span class="muted" style="color:var(--text-dim);font-weight:400;">— local-LLM stack-app builder</span></h1>
+        <div id="peers-strip" aria-label="Peer status">
+            <span class="peer" data-peer="prompt_enhancer"><span class="dot"></span>prompt-enhancer</span>
+            <span class="peer" data-peer="round_robin"><span class="dot"></span>round-robin</span>
+            <span class="peer" data-peer="development"><span class="dot"></span>development</span>
+        </div>
+    </header>
 
-    <label for="goal"><strong>Goal</strong></label>
-    <textarea id="goal" placeholder="e.g. A simple notes app with tags, persisted to SQLite, served by FastAPI."></textarea>
+    <main>
+        <section class="panel" id="form-panel">
+            <h2>Build request</h2>
+            <form id="build-form">
+                <label for="goal">Goal <span style="color:var(--red)">*</span></label>
+                <textarea id="goal" name="goal" required minlength="10"
+                    placeholder="A simple notes app with tags, persisted to SQLite, served by FastAPI."></textarea>
 
-    <div class="row">
-        <label for="stack-hint" class="muted">Stack hint</label>
-        <input id="stack-hint" type="text" placeholder="e.g. fastapi+sqlite+htmx" />
-    </div>
-    <div class="row">
-        <label for="target-lang" class="muted">Target language</label>
-        <input id="target-lang" type="text" placeholder="e.g. python" />
-    </div>
+                <label for="stack-hint">Stack hint (optional)</label>
+                <input id="stack-hint" name="stack-hint" type="text"
+                    placeholder="e.g. react+fastapi+postgres" />
 
-    <button id="submit">Build</button>
-    <span id="status" class="muted"></span>
+                <label for="target-lang">Target language</label>
+                <select id="target-lang" name="target-lang">
+                    <option value="">auto</option>
+                    <option value="python">python</option>
+                    <option value="typescript">typescript</option>
+                    <option value="go">go</option>
+                    <option value="rust">rust</option>
+                </select>
 
-    <h2>Result</h2>
-    <pre id="result">(none yet)</pre>
+                <label for="constraints">Constraints (key=value, one per line)</label>
+                <textarea id="constraints" name="constraints"
+                    placeholder="max_loc=500&#10;no_external_deps=true"></textarea>
+
+                <button id="submit-btn" type="submit">Build</button>
+                <div id="status"></div>
+            </form>
+
+            <div id="result-panel" aria-live="polite">
+                <h2 style="margin-top:1rem">Result</h2>
+                <div class="meta-row">
+                    <span>Duration: <b id="r-duration">—</b></span>
+                    <span>Stages: <b id="r-stages">—</b></span>
+                </div>
+                <details>
+                    <summary>Architect plan</summary>
+                    <pre id="r-plan">—</pre>
+                </details>
+                <details>
+                    <summary>Artifacts</summary>
+                    <div id="r-artifacts">—</div>
+                </details>
+            </div>
+        </section>
+
+        <section class="panel" id="log-panel">
+            <h2>Event log</h2>
+            <div id="event-controls">
+                <span id="conn-state" class="dead"><span class="dot" style="display:inline-block;width:0.55rem;height:0.55rem;border-radius:50%;background:currentColor"></span><span id="conn-label">disconnected</span></span>
+                <button type="button" id="scroll-pause">Auto-scroll: on</button>
+            </div>
+            <div id="event-log" role="log" aria-live="polite"></div>
+        </section>
+    </main>
 
     <script>
+    (() => {
+        "use strict";
         const $ = (id) => document.getElementById(id);
+        const log = $("event-log");
+        const statusEl = $("status");
+        const submitBtn = $("submit-btn");
+        const resultPanel = $("result-panel");
+        const connState = $("conn-state");
+        const connLabel = $("conn-label");
+        const scrollPauseBtn = $("scroll-pause");
 
-        $("submit").addEventListener("click", async () => {
-            const body = {
-                goal: $("goal").value.trim(),
-                stack_hint: $("stack-hint").value.trim() || null,
-                target_lang: $("target-lang").value.trim() || null,
-                constraints: {},
-            };
-            if (!body.goal) {
-                $("status").textContent = "Please enter a goal.";
+        let autoScroll = true;
+        let lastEventId = 0;
+        let evtSrc = null;
+
+        // ── peers + version (best-effort) ──────────────────────
+        async function loadHealth() {
+            try {
+                const r = await fetch("/api/health");
+                const j = await r.json();
+                if (j && j.version) {
+                    $("version-badge").textContent = "v" + j.version;
+                }
+            } catch (e) { /* offline; leave the badge */ }
+        }
+
+        async function loadPeers() {
+            try {
+                const r = await fetch("/api/peers");
+                const j = await r.json();
+                const services = (j && j.services) || {};
+                document.querySelectorAll("#peers-strip .peer").forEach((el) => {
+                    const key = el.dataset.peer;
+                    if (services[key]) el.classList.add("up");
+                    else el.classList.add("down");
+                });
+            } catch (e) {
+                document.querySelectorAll("#peers-strip .peer").forEach((el) => el.classList.add("down"));
+            }
+        }
+
+        // ── event log helpers ──────────────────────────────────
+        function fmtTime(tsSec) {
+            const d = new Date(tsSec * 1000);
+            return d.toTimeString().slice(0, 8);
+        }
+
+        function summarize(kind, payload) {
+            if (!payload || typeof payload !== "object") return "";
+            const parts = [];
+            for (const k of ["stage", "step", "request_id", "duration_ms"]) {
+                if (k in payload) parts.push(`${k}=${payload[k]}`);
+            }
+            if ("plan" in payload && payload.plan && typeof payload.plan === "object") {
+                if (Array.isArray(payload.plan.layers)) {
+                    parts.push(`plan_layers=${payload.plan.layers.length}`);
+                }
+            }
+            if ("error" in payload) parts.push(`error=${String(payload.error).slice(0, 80)}`);
+            if ("message" in payload) parts.push(String(payload.message).slice(0, 100));
+            if (!parts.length) {
+                // fallback: show keys list
+                return Object.keys(payload).slice(0, 4).join(", ");
+            }
+            return parts.join(" • ");
+        }
+
+        function appendEvent(id, kind, ts, payload) {
+            const row = document.createElement("div");
+            row.className = "event";
+            row.dataset.id = String(id);
+
+            const tsEl = document.createElement("span");
+            tsEl.className = "ts";
+            tsEl.textContent = fmtTime(ts || Date.now() / 1000);
+
+            const kindEl = document.createElement("span");
+            kindEl.className = "kind kind-" + kind;
+            kindEl.textContent = kind;
+
+            const summary = document.createElement("span");
+            summary.className = "summary";
+            summary.textContent = summarize(kind, payload);
+
+            row.append(tsEl, kindEl, summary);
+            log.appendChild(row);
+
+            // Cap size
+            while (log.childElementCount > 500) log.removeChild(log.firstChild);
+
+            if (autoScroll) log.scrollTop = log.scrollHeight;
+
+            // Result panel hooks
+            if (kind === "BUILD_DONE") renderResult(payload);
+            if (kind === "BUILD_FAILED") renderFailure(payload);
+        }
+
+        function renderResult(payload) {
+            resultPanel.classList.add("shown");
+            $("r-duration").textContent =
+                payload && payload.duration_ms != null
+                    ? `${payload.duration_ms} ms`
+                    : "—";
+            const stages = (payload && (payload.stages_completed || payload.stages)) || [];
+            $("r-stages").textContent = Array.isArray(stages) ? stages.join(", ") : String(stages);
+            const plan = (payload && payload.plan) || {};
+            $("r-plan").textContent = JSON.stringify(plan, null, 2);
+
+            const artBox = $("r-artifacts");
+            artBox.innerHTML = "";
+            const artifacts = (payload && payload.artifacts) || {};
+            const entries = Object.entries(artifacts);
+            if (!entries.length) {
+                artBox.textContent = "(none)";
                 return;
             }
-            $("status").textContent = "Building...";
-            $("result").textContent = "(running)";
+            for (const [path, content] of entries) {
+                const wrap = document.createElement("div");
+                wrap.className = "artifact";
+                const det = document.createElement("details");
+                const sum = document.createElement("summary");
+                sum.innerHTML = `<code>${escapeHtml(path)}</code> <span style="color:var(--text-dim);font-weight:400">— ${String(content).length} chars</span>`;
+                const pre = document.createElement("pre");
+                pre.textContent = String(content);
+                det.append(sum, pre);
+                wrap.append(det);
+                artBox.append(wrap);
+            }
+        }
+
+        function renderFailure(payload) {
+            resultPanel.classList.add("shown");
+            $("r-plan").textContent = JSON.stringify(payload || {}, null, 2);
+            $("r-duration").textContent = "failed";
+            $("r-stages").textContent = "—";
+            $("r-artifacts").textContent = "(no artifacts)";
+        }
+
+        function escapeHtml(s) {
+            return String(s)
+                .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+        }
+
+        // ── SSE connection ────────────────────────────────────
+        function setConnState(state, label) {
+            connState.className = state;
+            connLabel.textContent = label;
+        }
+
+        function connect() {
+            if (evtSrc) {
+                try { evtSrc.close(); } catch (e) {}
+            }
+            const url = "/api/events" + (lastEventId > 0 ? `?from_id=${lastEventId}` : "");
+            // Browsers also forward the Last-Event-ID header automatically
+            // when reconnecting, but we pin it explicitly via from_id so the
+            // resume point works on the very first reconnect.
+            evtSrc = new EventSource(url);
+            setConnState("retry", "connecting…");
+
+            evtSrc.onopen = () => setConnState("live", "live");
+            evtSrc.onerror = () => {
+                // EventSource auto-reconnects (browser obeys the `retry:` field).
+                setConnState("retry", "reconnecting…");
+            };
+            // Generic 'message' fires only when no `event:` field is sent; we
+            // always send a `event: <KIND>` line so we attach handlers per
+            // known kind plus a fallback via addEventListener('message').
+            const KNOWN = [
+                "BUILD_STARTED", "STAGE_STARTED", "STAGE_PROGRESS",
+                "STAGE_DONE", "STAGE_FAILED", "BUILD_FAILED", "BUILD_DONE",
+            ];
+            const handle = (e) => {
+                try {
+                    const id = parseInt(e.lastEventId || "0", 10) || 0;
+                    if (id > lastEventId) lastEventId = id;
+                    const data = e.data ? JSON.parse(e.data) : {};
+                    const ts = (data && data.ts) || (Date.now() / 1000);
+                    appendEvent(id, e.type || "message", ts, data);
+                } catch (err) {
+                    appendEvent(0, "PARSE_ERROR", Date.now() / 1000, { error: String(err) });
+                }
+            };
+            for (const k of KNOWN) evtSrc.addEventListener(k, handle);
+            evtSrc.addEventListener("message", handle);
+        }
+
+        // ── form submission ────────────────────────────────────
+        function parseConstraints(text) {
+            const out = {};
+            for (const line of text.split(/\n+/)) {
+                const t = line.trim();
+                if (!t) continue;
+                const idx = t.indexOf("=");
+                if (idx < 0) continue;
+                const k = t.slice(0, idx).trim();
+                const vRaw = t.slice(idx + 1).trim();
+                if (!k) continue;
+                let v = vRaw;
+                if (vRaw === "true") v = true;
+                else if (vRaw === "false") v = false;
+                else if (/^-?\d+$/.test(vRaw)) v = parseInt(vRaw, 10);
+                else if (/^-?\d+\.\d+$/.test(vRaw)) v = parseFloat(vRaw);
+                out[k] = v;
+            }
+            return out;
+        }
+
+        $("build-form").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const goal = $("goal").value.trim();
+            if (goal.length < 10) {
+                statusEl.textContent = "Goal must be at least 10 characters.";
+                statusEl.classList.add("err");
+                return;
+            }
+            statusEl.classList.remove("err");
+            const body = {
+                goal,
+                stack_hint: $("stack-hint").value.trim() || null,
+                target_lang: $("target-lang").value || null,
+                constraints: parseConstraints($("constraints").value),
+            };
+            submitBtn.disabled = true;
+            statusEl.textContent = "Building… (see event log)";
             try {
                 const r = await fetch("/api/build", {
                     method: "POST",
                     headers: { "content-type": "application/json" },
                     body: JSON.stringify(body),
                 });
-                const data = await r.json();
-                $("status").textContent = r.ok ? "Done." : "Failed.";
-                $("result").textContent = JSON.stringify(data, null, 2);
+                if (!r.ok) {
+                    const text = await r.text();
+                    statusEl.textContent = `Server returned ${r.status}.`;
+                    statusEl.classList.add("err");
+                    appendEvent(0, "BUILD_FAILED", Date.now() / 1000,
+                        { error: text.slice(0, 200) });
+                } else {
+                    statusEl.textContent = "Done.";
+                }
             } catch (err) {
-                $("status").innerHTML = '<span class="err">Network error.</span>';
-                $("result").textContent = String(err);
+                statusEl.textContent = "Network error: " + err;
+                statusEl.classList.add("err");
+            } finally {
+                submitBtn.disabled = false;
             }
         });
+
+        // ── auto-scroll pause: any wheel/scroll-up pauses ─────
+        log.addEventListener("scroll", () => {
+            const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 16;
+            autoScroll = atBottom;
+            scrollPauseBtn.textContent = "Auto-scroll: " + (autoScroll ? "on" : "off");
+        });
+        scrollPauseBtn.addEventListener("click", () => {
+            autoScroll = !autoScroll;
+            if (autoScroll) log.scrollTop = log.scrollHeight;
+            scrollPauseBtn.textContent = "Auto-scroll: " + (autoScroll ? "on" : "off");
+        });
+
+        // ── boot ─────────────────────────────────────────────
+        loadHealth();
+        loadPeers();
+        connect();
+    })();
     </script>
 </body>
 </html>

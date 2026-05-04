@@ -15,13 +15,16 @@ SQLite path or LM Studio.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -36,6 +39,22 @@ from .types import BUILD_DONE, BUILD_FAILED, BuildRequest
 logger = logging.getLogger("development.server")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# Default SSE keepalive: every 15s send a ``: keepalive`` comment so
+# corporate proxies don't drop the connection. Tests override this.
+SSE_KEEPALIVE_SECONDS = 15.0
+
+
+def _sse_event(event_id: int, kind: str, payload: dict[str, Any]) -> bytes:
+    """Format one SSE record as bytes ready for the StreamingResponse generator.
+
+    Per the SSE spec, each record is one or more ``field: value`` lines
+    terminated by a blank line. We always emit ``id:``, ``event:`` and
+    ``data:`` (single-line JSON, no embedded newlines).
+    """
+    data = json.dumps(payload, default=str)
+    record = f"id: {event_id}\nevent: {kind}\ndata: {data}\n\n"
+    return record.encode("utf-8")
 
 
 # ── Pydantic request bodies ─────────────────────────────────────────
@@ -155,6 +174,109 @@ def create_app(
             if e.kind in {BUILD_DONE, BUILD_FAILED}
         ][:limit]
         return JSONResponse({"runs": terminal})
+
+    # ── /api/events (SSE) ────────────────────────────────────────
+    @app.get("/api/events")
+    async def get_events(
+        request: Request,
+        kinds: str | None = None,
+        from_id: int = 0,
+        keepalive: float | None = None,
+    ) -> StreamingResponse:
+        """Server-Sent Events stream of MessageBoard events.
+
+        Query params:
+
+        * ``kinds``: optional CSV, e.g. ``?kinds=BUILD_STARTED,STAGE_DONE``.
+          When omitted, every event kind is streamed.
+        * ``from_id``: skip events with ``id <= from_id``. Browsers use
+          this on reconnect via the ``Last-Event-ID`` header (we also
+          honor that header — see below).
+        * ``keepalive``: override the keepalive comment interval in
+          seconds (test hook; production uses :data:`SSE_KEEPALIVE_SECONDS`).
+        """
+        wanted: list[str] | None = (
+            [k.strip() for k in kinds.split(",") if k.strip()] if kinds else None
+        )
+
+        # Honor the standard SSE Last-Event-ID reconnect header. Query
+        # param ``from_id`` wins if explicitly nonzero so callers can
+        # force a starting point.
+        if from_id <= 0:
+            try:
+                last = int(request.headers.get("last-event-id", "0"))
+                if last > 0:
+                    from_id = last
+            except (TypeError, ValueError):
+                pass
+
+        ka_interval = (
+            float(keepalive) if keepalive and keepalive > 0 else SSE_KEEPALIVE_SECONDS
+        )
+
+        async def gen():
+            # First frame: tell the browser to retry after 5s on disconnect.
+            yield b"retry: 5000\n\n"
+
+            sub = message_board.subscribe(
+                kinds=wanted, poll_interval=0.05, from_id=from_id
+            )
+            sub_iter = sub.__aiter__()
+            next_task: asyncio.Task | None = None
+            try:
+                while True:
+                    # Best-effort disconnect probe; only checked between
+                    # iterations to keep the hot path simple.
+                    try:
+                        if await request.is_disconnected():
+                            break
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if next_task is None or next_task.done():
+                        if next_task is None:
+                            next_task = asyncio.create_task(
+                                sub_iter.__anext__()
+                            )
+                    try:
+                        ev = await asyncio.wait_for(
+                            asyncio.shield(next_task), timeout=ka_interval
+                        )
+                    except asyncio.TimeoutError:
+                        # No event within the keepalive window — emit a
+                        # comment and loop. next_task stays alive.
+                        yield b": keepalive\n\n"
+                        continue
+                    except StopAsyncIteration:
+                        break
+
+                    next_task = None
+                    yield _sse_event(ev.id, ev.kind, ev.payload)
+            finally:
+                # Cancel the dangling next_task so the subscribe() coroutine
+                # unwinds cleanly. We swallow everything because cleanup
+                # should never propagate.
+                if next_task is not None and not next_task.done():
+                    next_task.cancel()
+                    try:
+                        await next_task
+                    except BaseException:  # noqa: BLE001
+                        pass
+                aclose = getattr(sub, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except BaseException:  # noqa: BLE001
+                        pass
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",  # nginx: don't buffer SSE
+                "Connection": "keep-alive",
+            },
+        )
 
     return app
 

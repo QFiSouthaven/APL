@@ -1,4 +1,12 @@
-"""HTTP-surface tests: /api/health, /api/peers, /api/build, /api/runs."""
+"""HTTP-surface tests: /api/health, /api/peers, /api/build, /api/runs.
+
+The endpoint tests exercise HTTP-layer behaviour (status codes, JSON
+shape, query params), not the full Architect-Coder-Reviewer chain. We
+override the orchestrator's pipeline to ``[ArchitectStage]`` so a single
+canned LLM response in ``fake_lm`` is enough to drive a build to
+completion. Full-pipeline integration is covered in
+``tests/test_orchestrator.py``.
+"""
 
 from __future__ import annotations
 
@@ -11,13 +19,17 @@ from development import __version__
 from development.messageboard import MessageBoard
 from development.orchestrator import Orchestrator
 from development.server import create_app
+from development.stages import ArchitectStage
 
 from tests.conftest import FakeLMClient
 
 
 @pytest.fixture
 def client(fake_lm: FakeLMClient, tmp_board: MessageBoard) -> TestClient:
-    orch = Orchestrator(fake_lm, tmp_board)
+    orch = Orchestrator(
+        fake_lm, tmp_board,
+        stages=[ArchitectStage(fake_lm)],
+    )
     app = create_app(message_board=tmp_board, orchestrator=orch)
     with TestClient(app) as c:
         yield c
@@ -82,3 +94,61 @@ def test_runs_returns_terminal_events_only(
 def test_runs_rejects_bad_limit(client: TestClient):
     assert client.get("/api/runs?limit=0").status_code == 400
     assert client.get("/api/runs?limit=99999").status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_events_endpoint_returns_event_stream(
+    fake_lm: FakeLMClient, tmp_board: MessageBoard
+):
+    """/api/events must respond 200 with text/event-stream content-type.
+
+    The streaming surface is exercised under a real uvicorn server in
+    ``test_sse_events.py`` (TestClient and httpx ASGITransport both
+    buffer responses, deadlocking on open-ended streams). Here we rely
+    on the dedicated test module for the wire-level check; this test
+    only confirms the route exists.
+    """
+    import httpx
+    from development.orchestrator import Orchestrator
+
+    from tests.test_sse_events import _ServerThread
+
+    orch = Orchestrator(fake_lm, tmp_board)
+    app = create_app(message_board=tmp_board, orchestrator=orch)
+    with _ServerThread(app) as srv:
+        async with httpx.AsyncClient(base_url=srv.base_url, timeout=4.0) as ac:
+            async with ac.stream("GET", "/api/events?keepalive=0.05") as resp:
+                assert resp.status_code == 200
+                assert resp.headers["content-type"].startswith("text/event-stream")
+                async for chunk in resp.aiter_text():
+                    if chunk:
+                        break
+
+
+def test_root_returns_html_ui(client: TestClient):
+    """GET / must return the static HTML shell."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    body = resp.text
+    assert "<form" in body
+    assert "<script" in body
+
+
+def test_root_html_is_well_formed(client: TestClient):
+    """Body should parse as HTML and contain the elements integrations rely on."""
+    from html.parser import HTMLParser
+
+    class _Tags(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tags: list[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            self.tags.append(tag)
+
+    body = client.get("/").text
+    p = _Tags()
+    p.feed(body)
+    for required in ("html", "head", "body", "form", "textarea", "button", "script"):
+        assert required in p.tags, f"missing <{required}> in /"
