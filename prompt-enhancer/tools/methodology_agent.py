@@ -75,17 +75,24 @@ Be terse. Cite file:line where possible. If nothing meaningful to flag, say so u
 
 
 def _get_diff() -> str:
-    """Prefer staged diff; fall back to last commit."""
+    """Prefer staged diff; fall back to last commit.
+
+    Force UTF-8 with replace-on-error so non-ASCII bytes in diffs
+    (binary blobs, smart quotes in commit messages, etc.) don't crash
+    the agent on Windows where the default code page is cp1252.
+    """
     try:
         staged = subprocess.run(
             ["git", "diff", "--staged"],
             cwd=REPO_ROOT, capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
         )
         if staged.returncode == 0 and staged.stdout.strip():
             return staged.stdout
         last = subprocess.run(
             ["git", "show", "--stat", "-p", "HEAD"],
             cwd=REPO_ROOT, capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
         )
         return last.stdout if last.returncode == 0 else ""
     except (subprocess.SubprocessError, OSError):
