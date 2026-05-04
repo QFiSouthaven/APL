@@ -26,12 +26,14 @@ conservative approve verdict — review-fallback consistent with
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from typing import Any
 
 from .lm_client import LMLinkClient
+from .reasoning_panel import ReasoningPanel  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +221,7 @@ async def review_with_dialogue(
     lm_client: Any | None = None,
     timeout_per_call: float = 60.0,
     model: str | None = None,
+    reasoning_panel: ReasoningPanel | None = None,  # type: ignore[valid-type]
 ) -> dict[str, Any]:
     """Two-pass code review with consensus synthesis.
 
@@ -235,10 +238,30 @@ async def review_with_dialogue(
     approve-verdict for that pass (so a single bad model output doesn't
     fail the whole review). On TRANSPORT failures (LM Studio unreachable,
     HTTP errors) we let the exception propagate — the caller renders 503.
+
+    When ``reasoning_panel`` is provided, the first ``len(panel)`` slots
+    emit verdicts in parallel (each acting as an independent reviewer);
+    deterministic aggregation rules apply across ALL slot verdicts (any
+    rejection rejects, OR for regenerate, dedup-merge issues). The
+    CONSENSUS_SYSTEM call still runs as a final reconciler driven by the
+    ``lm_client`` (or the slot 0 provider as a fallback). The ``agents``
+    field in the response grows to include one entry per slot
+    (``agent_<n>_verdict``) plus ``consensus``.
     """
     del timeout_per_call  # accepted for API stability; LMLinkClient owns its own timeouts
-    client = lm_client if lm_client is not None else LMLinkClient()
     review_model = model or ""
+
+    if reasoning_panel is not None:
+        return await _review_with_panel(
+            layer=layer,
+            purpose=purpose,
+            files=files,
+            panel=reasoning_panel,
+            lm_client=lm_client,
+            review_model=review_model,
+        )
+
+    client = lm_client if lm_client is not None else LMLinkClient()
 
     # ── Pass 1: Agent A ────────────────────────────────────────────────
     a_messages = [
@@ -310,6 +333,139 @@ async def review_with_dialogue(
             "consensus": consensus_text,
         },
     }
+
+
+# ── Panel-driven review path ───────────────────────────────────────────
+
+
+async def _call_slot_for_review(
+    slot: Any,
+    messages: list[dict[str, Any]],
+) -> str:
+    """Invoke one slot's chat(); return the raw string. Errors are CAPTURED
+    and surfaced as an empty string so a single crashing slot doesn't kill
+    the whole review (matches the existing best-effort fallback).
+    """
+    try:
+        return await slot.provider.chat(
+            messages, model=slot.model, temperature=0.2,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort tolerance
+        logger.warning("Panel slot %r raised during review: %s", slot.name, exc)
+        return ""
+
+
+async def _review_with_panel(
+    *,
+    layer: str,
+    purpose: str,
+    files: dict[str, str],
+    panel: ReasoningPanel,  # type: ignore[valid-type]
+    lm_client: Any | None,
+    review_model: str,
+) -> dict[str, Any]:
+    """Run a panel-driven review.
+
+    All ``len(panel)`` slots emit verdicts in parallel; deterministic
+    aggregation rules apply across every slot. The consensus call still
+    runs (via lm_client if provided, else slot 0's provider).
+
+    Each slot sees a system prompt blended from its own ``role`` (when
+    present) and ``AGENT_A_SYSTEM`` so its output shape stays compatible
+    with :func:`_parse_json`. Slot 0 keeps the AGENT_A persona; remaining
+    slots get AGENT_B-style prompting (with the layer's purpose) so they
+    aren't all reviewing in the same exact mode.
+    """
+    slots = list(panel.slots)
+    user_prompt = _build_user_prompt(layer, purpose, files)
+
+    async def _one_slot(idx: int, slot: Any) -> dict[str, Any]:
+        # Slot 0 acts as the pragmatic Agent A; the rest use the rigorous
+        # Agent B prompting so they hunt for bugs the primary missed.
+        # Role-decorated system prepended (if any) before the canonical
+        # review system prompt.
+        review_system = AGENT_A_SYSTEM if idx == 0 else AGENT_B_SYSTEM
+        deco = slot.system_decoration() if hasattr(slot, "system_decoration") else ""
+        system_content = (
+            f"{deco}\n\n{review_system}" if deco else review_system
+        )
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_prompt},
+        ]
+        raw = await _call_slot_for_review(slot, messages)
+        return _normalize_agent_verdict(_parse_json(raw))
+
+    # Run all slots in parallel.
+    verdicts: list[dict[str, Any]] = await asyncio.gather(
+        *(_one_slot(i, s) for i, s in enumerate(slots))
+    )
+
+    # Deterministic aggregation across all slot verdicts.
+    approved = all(bool(v["approved"]) for v in verdicts)
+    request_regenerate = any(bool(v["request_regenerate"]) for v in verdicts)
+    issues = _merge_issues(*(v["issues"] for v in verdicts))
+
+    # ── Consensus pass (still runs, like v0.4) ─────────────────────────
+    # Build the consensus prompt from all slot verdicts so the LLM has the
+    # full picture. Use the lm_client when supplied, else slot 0's
+    # provider as the consensus reconciler.
+    consensus_prompt = _build_consensus_prompt_n(layer, verdicts)
+    c_messages = [
+        {"role": "system", "content": CONSENSUS_SYSTEM},
+        {"role": "user", "content": consensus_prompt},
+    ]
+    consensus_text: str
+    try:
+        if lm_client is not None:
+            c_raw = await lm_client.chat(
+                c_messages, model=review_model, temperature=0.2,
+            )
+        else:
+            c_raw = await slots[0].provider.chat(
+                c_messages, model=slots[0].model, temperature=0.2,
+            )
+        c_parsed = _parse_json(c_raw)
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning("Panel consensus call failed: %s", exc)
+        c_parsed = None
+
+    if c_parsed is None:
+        consensus_text = _FALLBACK_VERDICT["consensus"]
+    else:
+        c_issues_raw = c_parsed.get("issues") or []
+        if isinstance(c_issues_raw, list):
+            issues = _merge_issues(issues, [str(i) for i in c_issues_raw if i])
+        consensus_raw = c_parsed.get("consensus")
+        consensus_text = (
+            consensus_raw if isinstance(consensus_raw, str) and consensus_raw.strip()
+            else _summarize_consensus(approved, request_regenerate, len(issues))
+        )
+
+    # Build agents block: one entry per slot, plus consensus.
+    agents: dict[str, Any] = {}
+    for i, v in enumerate(verdicts):
+        agents[f"agent_{i}_verdict"] = _short(v)
+    agents["consensus"] = consensus_text
+
+    return {
+        "approved": approved,
+        "issues": issues,
+        "request_regenerate": request_regenerate,
+        "agents": agents,
+    }
+
+
+def _build_consensus_prompt_n(
+    layer: str,
+    verdicts: list[dict[str, Any]],
+) -> str:
+    """Render the n-slot consensus prompt (one block per slot)."""
+    parts = [f"LAYER: {layer}\n"]
+    for i, v in enumerate(verdicts):
+        parts.append(f"AGENT {i} VERDICT:\n{json.dumps(v, indent=2)}\n")
+    parts.append("Reconcile all verdicts and emit the unified JSON.")
+    return "\n".join(parts)
 
 
 def _merge_issues(*lists: list[str]) -> list[str]:

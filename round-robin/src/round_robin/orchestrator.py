@@ -20,6 +20,7 @@ from .intel import COLLAB_DIRECTIVE, DialogueAnalyzer, intel_config_from_run
 from .lm_client import LMLinkClient, LMLinkError
 from .storage import SafeStorage
 from .config import STATE_FILE
+from .reasoning_panel import ReasoningPanel  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,29 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _replace_agents(config: RunConfig, agents: list[AgentConfig]) -> RunConfig:
+    """Return a copy of ``config`` with ``agents`` replaced.
+
+    Used when a ReasoningPanel is supplied — the slot list defines the
+    agents and we don't want to mutate the caller's RunConfig.
+    """
+    return RunConfig(
+        theme=config.theme,
+        agents=agents,
+        loop_limit=config.loop_limit,
+        pause_after_each_turn=config.pause_after_each_turn,
+        auto_retry=config.auto_retry,
+        auto_retry_backoff_s=config.auto_retry_backoff_s,
+        charlie=config.charlie,
+        intel_collab_directive=config.intel_collab_directive,
+        intel_anti_rambling=config.intel_anti_rambling,
+        intel_anti_yes_man=config.intel_anti_yes_man,
+        intel_redundancy_threshold=config.intel_redundancy_threshold,
+        intel_brief_threshold_tokens=config.intel_brief_threshold_tokens,
+        intel_agreement_threshold=config.intel_agreement_threshold,
+    )
+
+
 def _build_messages(
     agent: AgentConfig,
     theme: str,
@@ -108,6 +132,13 @@ class Orchestrator:
         self._charlie_workspace: CharlieWorkspace | None = None
         self._agreement_streak: int = 0
 
+        # Optional ReasoningPanel — when set, slot.provider.chat() drives each
+        # turn instead of self._client.chat_stream(). slot 0 = Agent A, slot 1
+        # = Agent B, slots 2..N append additional rounds. None preserves the
+        # existing 2-LLM dialogue byte-for-byte.
+        self._reasoning_panel: ReasoningPanel | None = None  # type: ignore[valid-type]
+        self._slot_by_name: dict[str, Any] = {}
+
         self.run_id: str | None = None
         self.config: RunConfig | None = None
         self.status: str = STATUS_IDLE
@@ -121,9 +152,37 @@ class Orchestrator:
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    async def start(self, config: RunConfig) -> str:
+    async def start(
+        self,
+        config: RunConfig,
+        *,
+        reasoning_panel: ReasoningPanel | None = None,  # type: ignore[valid-type]
+    ) -> str:
         if self.is_running():
             await self.stop()
+
+        # When a ReasoningPanel is supplied, its slots define the agents
+        # (slot 0 = Agent A, slot 1 = Agent B, slots 2..N = additional
+        # rounds). The panel must contain >= 2 slots so the existing
+        # 2-LLM minimum still holds. config.agents is replaced with the
+        # slot-derived list; everything else (loop_limit, intel toggles,
+        # charlie) flows through unchanged.
+        self._reasoning_panel = reasoning_panel
+        self._slot_by_name = {}
+        if reasoning_panel is not None:
+            slots = list(reasoning_panel.slots)
+            if len(slots) < 2:
+                raise ValueError(
+                    "ReasoningPanel must contain at least 2 slots "
+                    "(round-robin's 2-LLM dialogue minimum)."
+                )
+            derived_agents = [
+                AgentConfig(name=s.name, model=s.model, persona=s.role)
+                for s in slots
+            ]
+            config = _replace_agents(config, derived_agents)
+            self._slot_by_name = {s.name: s for s in slots}
+
         if len(config.agents) < 2:
             raise ValueError("At least 2 agents are required.")
 
@@ -260,12 +319,28 @@ class Orchestrator:
             full_text = ""
             t0 = time.monotonic()
             try:
-                async for token in self._client.chat_stream(messages, model=agent.model):
+                slot = self._slot_by_name.get(agent.name) if self._reasoning_panel else None
+                if slot is not None:
+                    # Panel path: call the slot's provider via chat() and
+                    # emit the result as a single synthetic chunk so the
+                    # event stream shape is preserved for downstream UI.
+                    full_text = await slot.provider.chat(
+                        messages, model=slot.model,
+                    )
+                    if full_text:
+                        await self._emit(
+                            "turn_chunk", turn=self.current_turn,
+                            agent_name=agent.name, token=full_text,
+                        )
                     if self._stop:
                         return
-                    full_text += token
-                    await self._emit("turn_chunk", turn=self.current_turn,
-                                     agent_name=agent.name, token=token)
+                else:
+                    async for token in self._client.chat_stream(messages, model=agent.model):
+                        if self._stop:
+                            return
+                        full_text += token
+                        await self._emit("turn_chunk", turn=self.current_turn,
+                                         agent_name=agent.name, token=token)
                 latency_ms = int((time.monotonic() - t0) * 1000)
                 self.transcript.append({
                     "agent": agent.name,
