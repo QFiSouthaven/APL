@@ -6,15 +6,15 @@ Local Desktop Studio for multi-pass AI prompt enhancement. LM Studio first; Olla
 
 Per `STATUS.md`, phases 0–7 are claimed done: 4-pass pipeline, SQLite persistence, ChatProvider abstraction, typer CLI, NiceGUI Studio, packaging scaffolded, live-tested 2026-04-28 against gpt-oss-120b.
 
-**Trust `STATUS.md` only after verifying against `git log` and `pytest -q`.** STATUS.md has drifted in the past — `api/`, `ui/pages/templates.py`, and `ui/pages/compare.py` shipped while STATUS.md still listed them as v0.2; the test count claim has lagged disk multiple times. As of v1.2.0 (2026-05-03) the prompt-enhancer suite is **161 tests in 15 files**; the round-robin sibling under the APL umbrella adds **129 tests** of its own. Total umbrella: 290. When in doubt, read `src/` and `tests/` directly.
+**Trust `STATUS.md` only after verifying against `git log` and `pytest -q`.** STATUS.md has drifted in the past — `api/`, `ui/pages/templates.py`, and `ui/pages/compare.py` shipped while STATUS.md still listed them as v0.2; the test count claim has lagged disk multiple times. As of v2.0.0 (2026-05-03) the prompt-enhancer suite is **275 tests in 20 files**; the round-robin sibling under the APL umbrella adds **129 tests** of its own. Total umbrella: 404. When in doubt, read `src/` and `tests/` directly.
 
 ## Frozen pipeline invariants
 
-`src/enhancer/core/pipeline.py` carries three regression-guarded rules. Do not change them without bumping the `EventType` enum to v2 and updating the regression tests.
+`src/enhancer/core/pipeline.py` carries three regression-guarded rules. They survived the v2.0 cut intact — the `EventType` enum got 6 additive members (no renames/removals), and TOML pipeline graph + MCP integration are both deferred to v2.0.1 patch so the invariants stay untouched in v2.0.
 
-1. **Pass 1 → Pass 2 are STRICTLY SERIAL.** Never `asyncio.gather`. Test: `tests/test_concurrency.py::test_pass1_pass2_serial` (asserts wall-time ≥ 2× per-call latency).
-2. **Pass 4 is awaited BEFORE Magnitude/SoT begin streaming.** Test: `test_pass4_awaited_before_magnitude` (asserts call timestamps).
-3. **Every `provider.chat_stream` call uses `idle_timeout=120`** — the provider default. Test: `test_idle_timeout_propagates`.
+1. **Pass 1 → Pass 2 are STRICTLY SERIAL.** Never `asyncio.gather`. Test: `tests/test_concurrency.py::test_pass1_pass2_serial` (asserts wall-time ≥ 2× per-call latency). Also enforced at LOAD time by `core/pipeline_graph.validate()` (invariant 1) when a TOML graph is supplied.
+2. **Pass 4 is awaited BEFORE Magnitude/SoT begin streaming.** Test: `test_pass4_awaited_before_magnitude` (asserts call timestamps). Also enforced at LOAD time by `pipeline_graph.validate()` (invariant 2).
+3. **Every `provider.chat_stream` call uses `idle_timeout=120`** — the provider default. Test: `test_idle_timeout_propagates`. Also enforced at LOAD time by `pipeline_graph.validate()` (invariant 3) — TOML configs that override `idle_timeout` on a streaming pass are rejected.
 
 Read `docs/EXTRACTION_GOTCHAS.md` before touching `pipeline.py`.
 
@@ -39,9 +39,11 @@ src/enhancer/
                 + lms_link (base-URL override) + lms_discovery (auto-load via `lms` CLI; multi-host aware — v1.2)
                 + resilience (@with_retry, @with_stream_retry, ProviderHealth circuit breaker)
                 + model_router (task-aware scorer selection via substring rules — v1.2)
-                + registry (`enhancer.providers` Python entry-point group — v1.2)
+                + registry (`enhancer.providers` + `enhancer.transforms` entry-point groups — v1.2 + v2.0)
   observability/  configure_logging() + structlog + soft OTEL hook (env-gated on OTEL_EXPORTER_OTLP_ENDPOINT) — v1.1
   api/          rest (incl. /api/runs, /api/sessions, /api/forward-to/{peer} — v1.2) + discovery (services.toml lookup)
+  mcp/          MCPClient + MCPRegistry + MCPToolInvoker (HTTP transport, JSON-RPC 2.0, retry-wrapped — v2.0)
+  core/pipeline_graph.py  TOML pipeline-graph loader + static invariant validator (foundation only; pipeline.py wiring is v2.0.1) — v2.0
   persistence/  SQLite (schema.sql, db, runs, sessions) + JSONL dual-writer + safestorage
   api/          REST + inter-product discovery (services.toml)
   cli/          typer entrypoint (main, enhance pre-flights ensure_model_loaded) + extras (batch / compare / export)
