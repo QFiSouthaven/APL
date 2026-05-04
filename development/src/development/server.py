@@ -71,6 +71,7 @@ class BuildRequestBody(BaseModel):
     stack_hint: str | None = None
     target_lang: str | None = None
     constraints: dict[str, Any] = Field(default_factory=dict)
+    reviewer: str = "single-pass"
 
     def to_request(self) -> BuildRequest:
         return BuildRequest(
@@ -78,6 +79,7 @@ class BuildRequestBody(BaseModel):
             stack_hint=self.stack_hint,
             target_lang=self.target_lang,
             constraints=dict(self.constraints),
+            reviewer=self.reviewer,
         )
 
 

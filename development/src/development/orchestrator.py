@@ -41,6 +41,7 @@ from typing import Sequence
 
 from .llm_client import LLMClient
 from .messageboard import MessageBoard
+from .reviewers import REVIEWERS, get_reviewer
 from .stages import (
     ArchitectStage,
     CoderStage,
@@ -103,6 +104,11 @@ class Orchestrator:
         message board so subscribers can render progress. A failing
         stage publishes STAGE_FAILED + BUILD_FAILED, but still returns
         a partial BuildResult with whatever earlier stages completed.
+
+        v2.0: ``request.reviewer`` selects the Stage-3 implementation
+        per-build. We materialize a build-specific stages list rather
+        than mutating ``self._stages`` so concurrent builds with
+        different reviewers don't trample each other's pipelines.
         """
         started_ns = time.perf_counter_ns()
         self._board.publish(BUILD_STARTED, {"request": request.to_dict()})
@@ -116,7 +122,25 @@ class Orchestrator:
         completed: list[str] = []
         errors: list[str] = []
 
+        # Per-build reviewer dispatch. We don't mutate self._stages
+        # because (a) concurrent builds may pick different reviewers and
+        # (b) the orchestrator's stages property is documented as a
+        # read-only diagnostic view of the configured pipeline. Build
+        # the substituted list once, iterate it, leave self._stages
+        # untouched.
+        stages_for_this_build: list[Stage] = []
         for stage in self._stages:
+            if (
+                isinstance(stage, ReviewerStage)
+                and request.reviewer != "single-pass"
+                and request.reviewer in REVIEWERS
+            ):
+                cls = get_reviewer(request.reviewer)
+                stages_for_this_build.append(cls(self._llm))
+            else:
+                stages_for_this_build.append(stage)
+
+        for stage in stages_for_this_build:
             self._board.publish(STAGE_STARTED, {"stage": stage.name})
             try:
                 ctx = await stage.run(ctx)

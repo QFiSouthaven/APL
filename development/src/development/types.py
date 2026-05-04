@@ -19,12 +19,19 @@ class BuildRequest:
     stage fills in defaults. ``constraints`` is an open dict so callers
     can attach things like ``{"max_loc": 500, "no_external_deps": True}``
     without requiring a pyproject change.
+
+    ``reviewer`` (v2.0+) selects the Stage-3 implementation. Defaults to
+    ``"single-pass"`` for backward compatibility — every pre-v2.0 caller
+    hits the same ReviewerStage they always did. Pass ``"round-robin"``
+    to route per-layer critique through the round-robin peer service.
+    See ``development.reviewers.REVIEWERS`` for the registry.
     """
 
     goal: str
     stack_hint: str | None = None
     target_lang: str | None = None
     constraints: dict[str, Any] = field(default_factory=dict)
+    reviewer: str = "single-pass"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
