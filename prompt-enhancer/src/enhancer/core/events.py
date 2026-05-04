@@ -5,6 +5,13 @@ here. Adding a new event is fine. **Renaming or repurposing an existing
 event is a v2 migration** — the swarm-agent-dev monolith and the analytics
 dashboard read this contract.
 
+The enum currently carries **36 members across 9 semantic groups**. The
+30 v1.x members are frozen at their existing names and string values; the
+6 v2.0 additions (provider-health, MCP, branching) were appended in
+semantic-group order without disturbing the v1 ordering. See
+``docs/MIGRATION.md`` and ``docs/EVENTS.md`` for the v1 → v2 contract
+expansion.
+
 Payload schemas are documented in docstrings; no enforcement at runtime
 (Python's duck typing keeps the hot path cheap). For static checking, see
 the typed payload dataclasses below.
@@ -63,6 +70,23 @@ class EventType(str, Enum):
     SESSION_DELETED        = "session_deleted"
     SESSION_ENTRY_ADDED    = "session_entry_added"
     SESSION_ACTIVE         = "session_active"
+
+    # ─── v2.0 additions ───────────────────────────────────────────────
+    # The following members were added in v2.0. Existing v1.x members
+    # above must NOT be renamed, removed, or reordered. v2.x will continue
+    # to emit all v1 names; see docs/MIGRATION.md.
+
+    # ── provider health (circuit-breaker observability) ───────────────
+    PROVIDER_HEALTH_OPEN   = "provider_health_open"
+    PROVIDER_HEALTH_CLOSED = "provider_health_closed"
+
+    # ── MCP tool invocation ───────────────────────────────────────────
+    MCP_TOOL_INVOKED       = "mcp_tool_invoked"
+    MCP_TOOL_RESULT        = "mcp_tool_result"
+
+    # ── run branching / merging ───────────────────────────────────────
+    BRANCHING_FORK         = "branching_fork"
+    BRANCHING_MERGE        = "branching_merge"  # reserved for v2.x — not yet emitted
 
 
 # ── canonical task types & techniques ────────────────────────────────
