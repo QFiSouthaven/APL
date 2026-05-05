@@ -34,15 +34,53 @@ from .. import __version__
 from ..config import db_path, jsonl_log_path, load
 from ..core.events import EventType
 from ..core.pipeline import PipelineOptions, build_resume_state, run_pipeline
+from ..llm.host_picker import apply_host_pick, parse_hosts
 from ..llm.lms_discovery import ModelLoadUnavailableError, ensure_model_loaded
 from ..llm.registry import get_provider
 from ..persistence import runs as runs_module
+
+# Env var consulted by the global typer callback when ``--lms-hosts`` is
+# not passed. Documented in the help string for the flag.
+LMS_HOSTS_ENV = "ENHANCER_LMS_HOSTS"
 
 app = typer.Typer(
     add_completion=False, no_args_is_help=True,
     help="Local Desktop Studio for multi-pass AI prompt enhancement.",
 )
 console = Console()
+
+
+@app.callback()
+def _global_options(
+    lms_hosts: str = typer.Option(
+        "",
+        "--lms-hosts",
+        envvar=LMS_HOSTS_ENV,
+        help=(
+            "Comma-separated LM Studio base URLs to probe at startup. "
+            "First host with a chat-capable model already loaded becomes "
+            "the active inference target. Falls back silently to the "
+            "configured default if no host responds. Also reads "
+            f"{LMS_HOSTS_ENV}."
+        ),
+    ),
+) -> None:
+    """Global CLI options. Multi-host LAN-discovery happens here so it
+    runs before any subcommand pre-flights ``ensure_model_loaded``.
+    """
+    hosts = parse_hosts(lms_hosts)
+    if not hosts:
+        return
+    chosen_host, chosen_model = asyncio.run(apply_host_pick(hosts))
+    if chosen_host:
+        console.print(
+            f"[dim]LM Studio host picker → {chosen_host} (model {chosen_model})[/dim]"
+        )
+    else:
+        console.print(
+            "[yellow]LM Studio host picker: no host in --lms-hosts responded "
+            "with a loaded chat model; using configured default.[/yellow]"
+        )
 
 
 @app.command()

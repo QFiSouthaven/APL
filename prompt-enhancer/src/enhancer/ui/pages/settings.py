@@ -18,6 +18,7 @@ import httpx
 from nicegui import ui
 
 from ...config import config_dir, data_dir, load, settings_path
+from ...llm.host_picker import apply_host_pick, parse_hosts
 
 
 def _sidebar() -> None:
@@ -68,6 +69,45 @@ def render() -> None:
             ui.input("Scorer model (blank = same as default)").bind_value(
                 state, "scorer_model"
             ).classes("w-full")
+
+        with ui.element("div").classes("studio-card"):
+            ui.label("Multi-host (LM Studio LAN discovery)").classes(
+                "text-caption text-grey"
+            )
+            ui.label(
+                "One host per line — e.g. http://127.0.0.1:1234/v1. "
+                "Click 'Pick best host now' to probe each host and route "
+                "inference to the first one that has a chat model loaded."
+            ).classes("text-caption text-grey")
+            hosts_state = {"hosts": ""}
+            ui.textarea(
+                placeholder=(
+                    "http://127.0.0.1:1234/v1\nhttp://192.168.1.50:1234/v1"
+                ),
+            ).bind_value(hosts_state, "hosts").classes("w-full").props("rows=4")
+            picker_status = ui.label("").classes("text-caption")
+
+            async def _pick_host() -> None:
+                hosts = parse_hosts(str(hosts_state["hosts"]))
+                if not hosts:
+                    picker_status.set_text("Add at least one host above first.")
+                    ui.notify("No hosts to probe", type="warning")
+                    return
+                picker_status.set_text(f"Probing {len(hosts)} host(s)…")
+                host, model = await apply_host_pick(hosts)
+                if host:
+                    picker_status.set_text(
+                        f"Active LM Studio host: {host} (loaded model: {model})"
+                    )
+                    ui.notify(f"Routing to {host}", type="positive")
+                else:
+                    picker_status.set_text(
+                        "No host responded with a loaded chat model — "
+                        "active URL unchanged."
+                    )
+                    ui.notify("No host responded", type="warning")
+
+            ui.button("Pick best host now", on_click=_pick_host).classes("w-full")
 
         with ui.element("div").classes("studio-card"):
             ui.label("Pipeline defaults").classes("text-caption text-grey")

@@ -71,3 +71,10 @@ def set_override(base_url: str | None) -> str | None:
         )
     SafeStorage.save_json(_store_path(), {"base_url": candidate})
     return candidate
+
+
+# Alias matching the v1.2 multi-host wiring spec. ``set_override`` is the
+# original swarm-agent name and remains the underlying contract; this
+# alias is what CLI/UI call sites use so the public surface tracks the
+# documented "active base URL" terminology.
+set_active_base_url = set_override
