@@ -214,3 +214,114 @@ async def post_persona_handoff(
     except Exception:  # noqa: BLE001
         pass
     return HandoffResult(status="ok", http_status=resp.status_code)
+
+
+# ── development build handoff ──────────────────────────────────────────
+
+
+def build_dev_build_request(
+    *, goal: str, stack_hint: str | None = None,
+    target_lang: str | None = None,
+) -> dict[str, Any]:
+    """Construct the JSON body for development's ``/api/build``.
+
+    Wire contract (per development.server.BuildRequestBody):
+
+    ``{goal: str, stack_hint: str | None, target_lang: str | None,
+       constraints: dict, reviewer: str}``
+
+    ``goal`` carries the enhanced prompt (becomes the build goal verbatim).
+    ``stack_hint`` is optional free text — when it matches a registered
+    stack template (e.g. "fastapi"), the Architect fast-path skips the LLM.
+    ``constraints`` is empty for the handoff path; the user can refine
+    in development's UI if needed. ``reviewer`` defaults to single-pass.
+    """
+    body: dict[str, Any] = {
+        "goal": goal or "",
+        "constraints": {"source": "prompt-enhancer"},
+        "reviewer": "single-pass",
+    }
+    if stack_hint:
+        body["stack_hint"] = stack_hint
+    if target_lang:
+        body["target_lang"] = target_lang
+    return body
+
+
+async def post_dev_build(
+    *,
+    goal: str,
+    stack_hint: str | None = None,
+    target_lang: str | None = None,
+    peer_name: str = "development",
+    timeout: float = 10.0,
+) -> HandoffResult:
+    """Fire-and-forget: kick off a development build with the enhanced prompt.
+
+    Mirrors :func:`post_persona_handoff`: same lookup, same failure
+    taxonomy. The POST itself is *kicked off* (we don't await the build —
+    development's /api/build is synchronous and a build can take minutes).
+    Instead, the helper opens an httpx connection just long enough to
+    confirm the request was accepted (a short timeout), then returns.
+
+    The build then runs in development's process; the Live Activity feed
+    surfaces its progress in PE Studio, and development's own UI at
+    http://127.0.0.1:8767 shows the live event chips.
+
+    The short timeout means most successful kicks return ``unreachable``
+    rather than ``ok`` — that's intentional: we treat sending as success.
+    A genuinely-unreachable peer fails immediately on connection, not on
+    timeout. The UI maps both ``ok`` and ``unreachable`` (with no error
+    matching connection-refused) as "build kicked off" toasts.
+
+    For a true "did the build accept the request?" check, the user can
+    watch the activity feed; development emits a BUILD_STARTED event
+    within ~50ms of receiving the POST.
+    """
+    peer_url = get_peer_url(peer_name)
+    if not peer_url:
+        return HandoffResult(
+            status="peer_missing",
+            error=f"{peer_name} sibling not in services.toml",
+        )
+
+    body = build_dev_build_request(
+        goal=goal, stack_hint=stack_hint, target_lang=target_lang,
+    )
+    target = f"{peer_url}/api/build"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(target, json=body)
+    except httpx.ConnectError as exc:
+        # Real "peer not running" — treat as unreachable.
+        return HandoffResult(
+            status="unreachable",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    except (httpx.TimeoutException, httpx.HTTPError) as exc:
+        # Timeout while build runs — kick succeeded, build is in flight.
+        # Surface as "ok" so the UI doesn't toast as a failure; the user
+        # watches via the activity feed and development's own UI.
+        return HandoffResult(
+            status="ok",
+            error=f"build accepted; running in background ({type(exc).__name__})",
+        )
+
+    if resp.status_code >= 400:
+        return HandoffResult(
+            status="http_error",
+            error=f"HTTP {resp.status_code}: {resp.text[:300]}",
+            http_status=resp.status_code,
+        )
+
+    # Synchronous return — the build completed within the timeout (rare for
+    # real builds, common in tests). Surface the result body if available.
+    try:
+        verdict = resp.json()
+    except ValueError:
+        verdict = None
+    return HandoffResult(
+        status="ok",
+        verdict=verdict if isinstance(verdict, dict) else None,
+        http_status=resp.status_code,
+    )

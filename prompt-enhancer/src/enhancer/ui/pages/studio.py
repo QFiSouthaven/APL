@@ -206,6 +206,14 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
                     rr_persona_btn = ui.button(
                         "→ Round Robin (Personas)", icon="groups",
                     ).props("flat color=secondary")
+                    # Development handoff: builds a stack-app from the
+                    # enhanced prompt. Distinct icon (build) + accent color.
+                    dev_stack_input = ui.input(
+                        placeholder="stack hint (e.g. fastapi)",
+                    ).props("dense outlined").classes("w-32")
+                    dev_build_btn = ui.button(
+                        "→ Development", icon="build",
+                    ).props("flat color=accent")
                     rr_status = ui.label("").classes("text-caption text-grey")
                 rr_row.style("display: none;")
                 rr_verdict_container = ui.column().classes("w-full mt-1")
@@ -496,6 +504,57 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
     state["_send_personas_to_round_robin"] = _send_personas_to_round_robin
 
     rr_persona_btn.on_click(_on_round_robin_personas_click)
+
+    async def _on_dev_build_click() -> None:
+        """Kick off a development build with the enhanced prompt as goal."""
+        result = state.get("last_result")
+        if result is None:
+            ui.notify("No completed run yet.", color="warning")
+            return
+        goal = getattr(result, "result", "") or ""
+        if not goal.strip():
+            ui.notify("Enhanced prompt is empty — nothing to build.",
+                      color="warning")
+            return
+        stack_hint = (dev_stack_input.value or "").strip() or None
+
+        dev_build_btn.disable()
+        rr_status.set_text("Sending to development…")
+        try:
+            from ..components.round_robin_handoff import post_dev_build
+            outcome = await post_dev_build(
+                goal=goal, stack_hint=stack_hint,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface unexpected errors
+            ui.notify(f"Development handoff failed: {exc}", color="negative")
+            rr_status.set_text("")
+            dev_build_btn.enable()
+            return
+
+        rr_status.set_text("")
+        dev_build_btn.enable()
+
+        if outcome.status == "ok":
+            ui.notify(
+                "Build kicked off in development. "
+                "Watch progress in the Live Activity panel below or open "
+                "http://127.0.0.1:8767 for development's own UI.",
+                color="positive", multi_line=True, close_button="OK",
+            )
+        elif outcome.status == "peer_missing":
+            ui.notify(outcome.error, color="warning")
+        elif outcome.status == "unreachable":
+            ui.notify(
+                f"Development unreachable: {outcome.error}. "
+                "Run Setup.bat / Start.bat from APL root to boot it.",
+                color="negative", multi_line=True,
+            )
+        else:  # http_error or anything else
+            ui.notify(
+                f"Development error: {outcome.error}", color="negative",
+            )
+
+    dev_build_btn.on_click(_on_dev_build_click)
 
     def _add_pass_card(**kwargs) -> ui.element:
         # Wire ↗ Branch from here onto every completed pass 1-3 card.

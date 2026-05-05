@@ -21,8 +21,10 @@ import pytest
 from enhancer.ui.components import round_robin_handoff
 from enhancer.ui.components.round_robin_handoff import (
     HandoffResult,
+    build_dev_build_request,
     build_persona_handoff_request,
     build_review_request,
+    post_dev_build,
     post_persona_handoff,
     post_review,
 )
@@ -344,3 +346,125 @@ async def test_persona_handoff_works_with_empty_bravo(monkeypatch) -> None:
     assert _MockAsyncClient.last_body is not None
     assert _MockAsyncClient.last_body["alpha_persona"] == "A"
     assert _MockAsyncClient.last_body["bravo_persona"] == ""
+
+
+# ─── development build handoff ─────────────────────────────────────────
+
+
+def test_dev_build_request_body_shape() -> None:
+    """The /api/build POST body must include goal + the source marker
+    in constraints; stack_hint and target_lang only when supplied."""
+    body = build_dev_build_request(
+        goal="Build a tax-filing chatbot.",
+        stack_hint="fastapi",
+        target_lang="python",
+    )
+
+    assert set(body.keys()) == {
+        "goal", "constraints", "reviewer", "stack_hint", "target_lang",
+    }
+    assert body["goal"] == "Build a tax-filing chatbot."
+    assert body["stack_hint"] == "fastapi"
+    assert body["target_lang"] == "python"
+    assert body["constraints"]["source"] == "prompt-enhancer"
+    assert body["reviewer"] == "single-pass"
+
+
+def test_dev_build_request_omits_optional_when_none() -> None:
+    """stack_hint and target_lang are added only when truthy."""
+    body = build_dev_build_request(goal="Build something")
+    assert "stack_hint" not in body
+    assert "target_lang" not in body
+    assert body["goal"] == "Build something"
+
+
+@pytest.mark.asyncio
+async def test_dev_build_handoff_handles_missing_peer(monkeypatch) -> None:
+    monkeypatch.setattr(
+        round_robin_handoff, "get_peer_url", lambda name: "",
+    )
+
+    result = await post_dev_build(goal="Build a thing")
+
+    assert result.status == "peer_missing"
+    assert "services.toml" in result.error
+
+
+@pytest.mark.asyncio
+async def test_dev_build_handoff_ok_returns_status_ok(monkeypatch) -> None:
+    """Synchronous 200 from /api/build (rare in production where builds
+    run minutes; common in tests) → status='ok' with verdict body."""
+    monkeypatch.setattr(
+        round_robin_handoff, "get_peer_url",
+        lambda name: "http://127.0.0.1:8767",
+    )
+    monkeypatch.setattr(
+        round_robin_handoff.httpx, "AsyncClient", _MockAsyncClient,
+    )
+    _MockAsyncClient.response = _MockResponse(
+        200, {"build_id": "abc123", "status": "completed"},
+    )
+
+    result = await post_dev_build(goal="Build", stack_hint="fastapi")
+
+    assert result.status == "ok"
+    assert result.http_status == 200
+    assert result.verdict == {"build_id": "abc123", "status": "completed"}
+    assert _MockAsyncClient.last_url == "http://127.0.0.1:8767/api/build"
+
+
+@pytest.mark.asyncio
+async def test_dev_build_handoff_timeout_returns_ok(monkeypatch) -> None:
+    """Timeout while build runs → kick succeeded, build is in flight.
+    Surface as 'ok' so the UI doesn't toast as a failure."""
+    monkeypatch.setattr(
+        round_robin_handoff, "get_peer_url",
+        lambda name: "http://127.0.0.1:8767",
+    )
+    monkeypatch.setattr(
+        round_robin_handoff.httpx, "AsyncClient", _MockAsyncClient,
+    )
+    _MockAsyncClient.raise_exc = httpx.ReadTimeout("read timeout")
+
+    result = await post_dev_build(goal="Build")
+
+    assert result.status == "ok"
+    assert "build accepted" in result.error
+    assert "ReadTimeout" in result.error
+
+
+@pytest.mark.asyncio
+async def test_dev_build_handoff_connect_error_unreachable(monkeypatch) -> None:
+    """ConnectError → genuine 'peer not running'; surface as unreachable."""
+    monkeypatch.setattr(
+        round_robin_handoff, "get_peer_url",
+        lambda name: "http://127.0.0.1:8767",
+    )
+    monkeypatch.setattr(
+        round_robin_handoff.httpx, "AsyncClient", _MockAsyncClient,
+    )
+    _MockAsyncClient.raise_exc = httpx.ConnectError("connection refused")
+
+    result = await post_dev_build(goal="Build")
+
+    assert result.status == "unreachable"
+    assert "ConnectError" in result.error
+
+
+@pytest.mark.asyncio
+async def test_dev_build_handoff_http_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        round_robin_handoff, "get_peer_url",
+        lambda name: "http://127.0.0.1:8767",
+    )
+    monkeypatch.setattr(
+        round_robin_handoff.httpx, "AsyncClient", _MockAsyncClient,
+    )
+    _MockAsyncClient.response = _MockResponse(
+        500, "build crashed: internal server error",
+    )
+
+    result = await post_dev_build(goal="Build")
+
+    assert result.status == "http_error"
+    assert result.http_status == 500
