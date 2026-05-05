@@ -142,6 +142,10 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   border-radius: 8px; margin-bottom: 10px; display: flex; gap: 10px; align-items: center; }
 .recovery-banner .meta { flex: 1; color: var(--muted); font-size: 12px; }
 .recovery-banner .meta strong { color: var(--text); }
+.handoff-banner { background: #142a3a; border: 1px solid #1f4666; padding: 8px 12px;
+  border-radius: 8px; margin-bottom: 10px; display: flex; gap: 10px; align-items: center; }
+.handoff-banner .meta { flex: 1; color: var(--muted); font-size: 12px; }
+.handoff-banner button { padding: 2px 10px; }
 .host-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 10px;
   font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-left: 6px;
   vertical-align: middle; border: 1px solid transparent; }

@@ -7,10 +7,11 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -129,6 +130,16 @@ class SummarizeBody(BaseModel):
     # which the frontend rendered as the infamous "Object: Object: error" toast.
     model: str | None = None
     session_id: str | None = None  # historical session to re-summarize
+
+
+class PersonaHandoff(BaseModel):
+    # Wire format is fixed across siblings (prompt-enhancer posts EXACTLY this).
+    # See round-robin docs / prompt-enhancer's handoff client. Do not rename
+    # fields without coordinating both sides.
+    theme: str
+    alpha_persona: str = ""
+    bravo_persona: str = ""
+    source: str = "prompt-enhancer"
 
 
 class ReviewRequest(BaseModel):
@@ -525,6 +536,46 @@ def create_app() -> FastAPI:
                 content={"error": f"review unavailable: {type(exc).__name__}: {exc}"},
             )
         return JSONResponse(verdict)
+
+    # ── Persona handoff (from prompt-enhancer) ─────────────────────────────
+    #
+    # Ephemeral, in-memory, one-shot. prompt-enhancer's "Send to Round Robin"
+    # POSTs personas + theme here; our UI fetches on page load, prefills, then
+    # DELETEs so a refresh doesn't re-stamp the same handoff. Persistence
+    # across server restarts is intentionally NOT supported.
+
+    handoff_state: dict[str, Any] = {"pending": None}
+    handoff_lock = asyncio.Lock()
+
+    @app.post("/api/persona-handoff")
+    async def post_persona_handoff(body: PersonaHandoff) -> JSONResponse:
+        if not body.theme.strip():
+            raise HTTPException(status_code=400, detail="theme is required")
+        stored_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        payload = {
+            "theme": body.theme,
+            "alpha_persona": body.alpha_persona,
+            "bravo_persona": body.bravo_persona,
+            "source": body.source,
+            "stored_at": stored_at,
+        }
+        async with handoff_lock:
+            handoff_state["pending"] = payload
+        return JSONResponse({"status": "ok", "stored_at": stored_at})
+
+    @app.get("/api/persona-handoff")
+    async def get_persona_handoff() -> Response:
+        async with handoff_lock:
+            payload = handoff_state["pending"]
+        if payload is None:
+            return Response(status_code=204)
+        return JSONResponse(payload)
+
+    @app.delete("/api/persona-handoff")
+    async def delete_persona_handoff() -> Response:
+        async with handoff_lock:
+            handoff_state["pending"] = None
+        return Response(status_code=204)
 
     # ── WebSocket ──────────────────────────────────────────────────────────
 

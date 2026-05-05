@@ -584,6 +584,57 @@ function appendNudgeCard(reason, content, turn) {
   scrollDialogueIfAtBottom(false);
 }
 
+// ── Persona handoff (from prompt-enhancer) ─────────────────────────────────
+
+async function checkPersonaHandoff() {
+  // Fetch any staged handoff (POSTed by prompt-enhancer's "Send to Round Robin"
+  // button). One-shot: prefill empty fields only, then DELETE so a refresh
+  // doesn't re-stamp the same handoff over later user edits.
+  let payload;
+  try {
+    const r = await fetch("/api/persona-handoff");
+    if (r.status === 204) return;
+    if (!r.ok) return;
+    payload = await r.json();
+  } catch { return; }
+  if (!payload) return;
+
+  const themeEl = $("#cfg-theme");
+  const alphaEl = $("#alpha-persona");
+  const bravoEl = $("#bravo-persona");
+  let prefilled = false;
+
+  if (payload.theme && themeEl && !themeEl.value.trim()) {
+    themeEl.value = payload.theme;
+    prefilled = true;
+  }
+  if (payload.alpha_persona && alphaEl && !alphaEl.value.trim()) {
+    alphaEl.value = payload.alpha_persona;
+    prefilled = true;
+  }
+  if (payload.bravo_persona && bravoEl && !bravoEl.value.trim()) {
+    bravoEl.value = payload.bravo_persona;
+    prefilled = true;
+  }
+
+  if (prefilled) {
+    showHandoffBanner();
+    // Persist the prefilled values to user-config so they survive a reload.
+    scheduleConfigSave();
+  }
+
+  // One-shot: clear the staged payload regardless of whether we actually
+  // prefilled (handoff was consumed; refreshing the page should not re-trigger).
+  try { await fetch("/api/persona-handoff", { method: "DELETE" }); }
+  catch { /* silent */ }
+}
+
+function showHandoffBanner() {
+  const banner = $("#handoff-banner");
+  if (!banner) return;
+  banner.hidden = false;
+}
+
 // ── Crash recovery banner ──────────────────────────────────────────────────
 
 async function checkRecoverableState() {
@@ -1117,9 +1168,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   setupDialogueScrollTracking();
   setRunControls("idle");
+  $("#handoff-banner-dismiss")?.addEventListener("click", () => {
+    const b = $("#handoff-banner");
+    if (b) b.hidden = true;
+  });
   await loadUserConfig();
   await refreshHealth();          // populates dropdowns + applies pending model selection
   await checkRecoverableState();  // surface banner if previous run was interrupted
+  await checkPersonaHandoff();    // prefill from prompt-enhancer if a handoff is staged
   setInterval(refreshHealth, 10000);
   connectWebSocket();
 });
