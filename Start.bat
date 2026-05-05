@@ -30,11 +30,22 @@ echo.
 exit /b 1
 
 :launch
+REM --- Activate prompt-enhancer's venv (the orchestrator's runtime) --------
+REM    lab/launch.py spawns each sibling using its OWN .venv\Scripts\python.exe
+REM    via absolute paths, so activation here only affects this orchestrator
+REM    process. Each sibling still runs under its own venv. Sub-venvs are not
+REM    "nested" — they're sibling subprocesses with their own interpreters.
+call "prompt-enhancer\.venv\Scripts\activate.bat"
+if errorlevel 1 (
+    echo [ERROR] failed to activate prompt-enhancer\.venv. Re-run Setup.bat.
+    exit /b 1
+)
+
 REM --- Idempotent services.toml bootstrap (silent) -------------------------
-"prompt-enhancer\.venv\Scripts\python.exe" -m enhancer.cli.main services init >NUL 2>&1
+python -m enhancer.cli.main services init >NUL 2>&1
 
 REM --- Quick LM Studio reachability hint (non-fatal) -----------------------
-"prompt-enhancer\.venv\Scripts\python.exe" -c "import httpx; httpx.get('http://127.0.0.1:1234/v1/models', timeout=3.0).raise_for_status()" 2>NUL
+python -c "import httpx; httpx.get('http://127.0.0.1:1234/v1/models', timeout=3.0).raise_for_status()" 2>NUL
 if errorlevel 1 (
     echo [WARNING] LM Studio not reachable at 127.0.0.1:1234.
     echo The siblings will boot but pipeline runs will fail until LM Studio is up.
@@ -49,6 +60,6 @@ echo   development      http://127.0.0.1:8767
 echo (Ctrl+C in this window to stop all three)
 echo.
 
-"prompt-enhancer\.venv\Scripts\python.exe" "lab\launch.py"
+python "lab\launch.py"
 
 endlocal
