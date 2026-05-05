@@ -153,7 +153,14 @@ def _start_component(name: str) -> tuple[subprocess.Popen | None, str]:
 def _wait_healthy(name: str, health_url: str) -> bool:
     deadline = time.monotonic() + HEALTH_TIMEOUT
     if _probe_health(health_url, deadline):
+        # Two banners: a structured "[launch]" line (existing contract) and a
+        # human-friendly "[ok] <component> at <base-url>" line that matches
+        # the umbrella spec wording. Both go to stdout; consumers should not
+        # parse either.
+        base_url = health_url.rsplit("/api/", 1)[0]
+        display_name = name.replace("_", "-")
         print(f"[launch] {name}: HEALTHY ({health_url})")
+        print(f"[ok] {display_name} at {base_url}")
         return True
     print(f"[launch] {name}: did NOT become healthy within {HEALTH_TIMEOUT}s")
     return False
@@ -179,11 +186,43 @@ def _shutdown(processes: dict[str, subprocess.Popen]) -> None:
                 pass
 
 
+def _check_config(targets: list[str]) -> int:
+    """Dry-run: report each target's resolved cwd, command, and base URL.
+
+    No subprocesses are spawned and no health probes are issued. Returns
+    0 if every target's prerequisites (cwd + venv python) exist, 1 if
+    any are missing.
+    """
+    bad = 0
+    for name in targets:
+        spec = COMPONENTS[name]
+        cwd: Path = spec["cwd"]
+        cmd: list[str] = spec["command"]
+        venv_python = cwd / cmd[0].replace("/", "\\")
+        url = _resolve_url(name)
+        print(f"[check] {name}:")
+        print(f"[check]   cwd        = {cwd} {'(exists)' if cwd.exists() else '(MISSING)'}")
+        print(f"[check]   python     = {venv_python} {'(exists)' if venv_python.exists() else '(MISSING)'}")
+        print(f"[check]   command    = {' '.join(cmd)}")
+        print(f"[check]   base url   = {url or '(unresolved)'}")
+        if not cwd.exists() or not venv_python.exists() or not url:
+            bad += 1
+    if bad:
+        print(f"[check] {bad} component(s) not bootable on this machine")
+        return 1
+    print("[check] all components ready to boot")
+    return 0
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Boot the APL umbrella components.")
     parser.add_argument(
         "components", nargs="*",
         help="Names of components to boot (default: all in COMPONENTS).",
+    )
+    parser.add_argument(
+        "--check", action="store_true",
+        help="Validate config and prerequisites without spawning anything.",
     )
     args = parser.parse_args(argv)
 
@@ -193,6 +232,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"[launch] unknown components: {invalid}")
         print(f"[launch] valid choices: {list(COMPONENTS.keys())}")
         return 2
+
+    if args.check:
+        return _check_config(targets)
 
     processes: dict[str, subprocess.Popen] = {}
     health_urls: dict[str, str] = {}
