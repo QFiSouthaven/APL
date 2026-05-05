@@ -332,17 +332,19 @@ async def test_orchestrate_panel_forwards_role_into_system_message():
     assert "rigorous code critic" in sys_blob
 
 
-# ── code_review: regression — None panel preserves v0.4 behavior ───────
+# ── code_review: regression — None panel preserves dialogue baseline ───
 
 
-async def test_review_with_no_panel_matches_v0_4_baseline():
-    """The 3-call dialogue (A → B → Consensus) must remain unchanged when
-    ``reasoning_panel=None`` (default).
+async def test_review_without_panel_unchanged():
+    """No panel = original dialogue (now 4-call with Charlie). Verify
+    aggregation rules still pass and ``agents`` block carries the four
+    voice keys.
     """
     client = FakeLMClient([
         _verdict_json(True, summary="A: ok"),
         _verdict_json(True, summary="B: ok"),
-        _consensus_json(True, consensus="both engineers approved"),
+        _verdict_json(True, summary="C: ok"),
+        _consensus_json(True, consensus="all three engineers approved"),
     ])
     out = await review_with_dialogue(
         "core", "do core things", {"a.py": "x = 1"}, lm_client=client,
@@ -350,123 +352,169 @@ async def test_review_with_no_panel_matches_v0_4_baseline():
     assert out["approved"] is True
     assert out["request_regenerate"] is False
     assert out["issues"] == []
-    # v0.4 contract: agent_a_verdict + agent_b_verdict + consensus.
+    # 4-voice contract: a/b/c verdicts + consensus.
     assert set(out["agents"].keys()) == {
-        "agent_a_verdict", "agent_b_verdict", "consensus",
+        "agent_a_verdict", "agent_b_verdict", "agent_c_verdict", "consensus",
     }
-    # Exactly 3 LM calls — no extra slot calls.
-    assert len(client.calls) == 3
+    # Exactly 4 LM calls — A, B, C, Consensus. No panel slot calls.
+    assert len(client.calls) == 4
 
 
-# ── code_review: panel grows agents block + makes N+1 calls ────────────
+# ── code_review: panel consults once per voice ─────────────────────────
 
 
-async def test_review_with_5_slot_panel_makes_6_calls_total():
-    """5 slots emit verdicts in parallel + 1 consensus call = 6 total
-    LM calls when an lm_client is supplied as the consensus reconciler.
+class _RecordingPanel:
+    """Minimal panel stand-in that records every ``consult`` call.
+
+    Each consult invocation returns a ``PanelResult``-shaped namespace
+    where ``aggregated`` is the next pre-canned response. Slot calls are
+    NOT exercised — this is a panel-level mock.
     """
-    panel, providers = _make_panel([
-        {"name": f"Slot{i}", "model": f"m{i}",
-         "responses": [_verdict_json(True, summary=f"S{i}")]}
-        for i in range(5)
-    ])
-    # Consensus call goes through lm_client.
-    client = FakeLMClient([_consensus_json(True, consensus="all approved")])
-    out = await review_with_dialogue(
-        "x", "p", {"f.py": "."}, lm_client=client, reasoning_panel=panel,
+
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = list(responses)
+        self.consult_calls: list[dict[str, Any]] = []
+
+    async def consult(self, messages, *, temperature=None, **kwargs):
+        idx = len(self.consult_calls)
+        self.consult_calls.append({"messages": messages, "temperature": temperature, **kwargs})
+        if not self.responses:
+            aggregated = ""
+        else:
+            aggregated = self.responses[min(idx, len(self.responses) - 1)]
+
+        class _R:
+            pass
+
+        result = _R()
+        result.aggregated = aggregated
+        return result
+
+
+async def test_review_with_panel_consults_panel_per_voice():
+    """Supply a panel; assert ``panel.consult`` is called once per voice
+    (4 times total: A, B, C, Consensus). Each call carries the pinned
+    system prompt for that voice."""
+    from round_robin.code_review import (
+        AGENT_A_SYSTEM,
+        AGENT_B_SYSTEM,
+        AGENT_C_SYSTEM,
+        CONSENSUS_SYSTEM,
     )
-    # 5 slot calls + 1 consensus call.
-    total_slot_calls = sum(len(p.calls) for p in providers)
-    assert total_slot_calls == 5
-    assert len(client.calls) == 1
+
+    panel = _RecordingPanel([
+        _verdict_json(True, summary="A says"),
+        _verdict_json(True, summary="B says"),
+        _verdict_json(True, summary="C says"),
+        _consensus_json(True, consensus="all approved"),
+    ])
+    out = await review_with_dialogue(
+        "x", "p", {"f.py": "."},
+        lm_client=None, reasoning_panel=panel,  # type: ignore[arg-type]
+    )
+    # Exactly 4 consultations (A, B, C, Consensus).
+    assert len(panel.consult_calls) == 4
+
+    # Each consultation's system prompt must match the voice's pinned constant.
+    sys_prompts = [
+        call["messages"][0]["content"]
+        for call in panel.consult_calls
+    ]
+    assert sys_prompts == [AGENT_A_SYSTEM, AGENT_B_SYSTEM, AGENT_C_SYSTEM, CONSENSUS_SYSTEM]
+
+    # Output shape: 4-voice agents block.
+    assert set(out["agents"].keys()) == {
+        "agent_a_verdict", "agent_b_verdict", "agent_c_verdict", "consensus",
+    }
     assert out["approved"] is True
 
 
-async def test_review_panel_agents_block_has_one_entry_per_slot_plus_consensus():
-    """5 slots → ``agents`` keys: agent_0..agent_4 + consensus."""
-    panel, _ = _make_panel([
-        {"name": f"Slot{i}", "model": f"m{i}",
-         "responses": [_verdict_json(True, summary=f"S{i}")]}
-        for i in range(5)
+async def test_review_with_panel_charlie_rejection_propagates():
+    """A and B approve, C (Charlie via panel) rejects → final rejected."""
+    panel = _RecordingPanel([
+        _verdict_json(True, summary="A approves"),
+        _verdict_json(True, summary="B approves"),
+        _verdict_json(False, issues=["second-order rollout risk"],
+                      summary="C rejects"),
+        _consensus_json(True, consensus="LLM is wrong"),
     ])
-    client = FakeLMClient([_consensus_json(True, consensus="ok")])
     out = await review_with_dialogue(
-        "x", "p", {"f.py": "."}, lm_client=client, reasoning_panel=panel,
+        "x", "p", {"f.py": "."},
+        lm_client=None, reasoning_panel=panel,  # type: ignore[arg-type]
     )
-    expected_keys = {f"agent_{i}_verdict" for i in range(5)} | {"consensus"}
-    assert set(out["agents"].keys()) == expected_keys
-    assert out["agents"]["consensus"] == "ok"
+    assert out["approved"] is False, "Charlie's rejection rejects overall"
+    assert "second-order rollout risk" in out["issues"]
 
 
-async def test_review_panel_aggregation_any_rejection_rejects():
-    """5 slots; one rejects → unified verdict rejects (any-rejection rule)."""
-    panel, _ = _make_panel([
-        {"name": "S0", "model": "m", "responses": [_verdict_json(True)]},
-        {"name": "S1", "model": "m", "responses": [_verdict_json(True)]},
-        {"name": "S2", "model": "m",
-         "responses": [_verdict_json(False, issues=["bug here"])]},
-        {"name": "S3", "model": "m", "responses": [_verdict_json(True)]},
-        {"name": "S4", "model": "m", "responses": [_verdict_json(True)]},
+async def test_review_with_panel_aggregates_dedup_across_voices():
+    """Panel mode: A/B/C issues are dedup-merged across voices."""
+    panel = _RecordingPanel([
+        _verdict_json(False, issues=["Race condition"]),
+        _verdict_json(False, issues=["race condition", "Missing tests"]),  # case-variant
+        _verdict_json(False, issues=["Maintenance burden"]),
+        _consensus_json(False, consensus="merge"),
     ])
-    client = FakeLMClient([_consensus_json(True, consensus="LLM said yes but rules say no")])
     out = await review_with_dialogue(
-        "x", "p", {"f.py": "."}, lm_client=client, reasoning_panel=panel,
+        "x", "p", {"f.py": "."},
+        lm_client=None, reasoning_panel=panel,  # type: ignore[arg-type]
     )
-    # Even though the LLM consensus said approved=true, the deterministic
-    # rule wins: any-rejection-rejects.
-    assert out["approved"] is False
-    assert "bug here" in out["issues"]
+    issues_lower = [i.lower() for i in out["issues"]]
+    # 3 distinct: race condition, missing tests, maintenance burden.
+    assert "race condition" in issues_lower
+    assert "missing tests" in issues_lower
+    assert "maintenance burden" in issues_lower
+    assert len(issues_lower) == len(set(issues_lower))
 
 
-async def test_review_panel_tolerates_one_crashing_slot():
-    """If a slot's provider raises, the panel review still produces a
-    verdict (best-effort, like the existing fallback)."""
-    panel, providers = _make_panel([
-        {"name": "S0", "model": "m", "responses": [_verdict_json(True)]},
-        {"name": "BadSlot", "model": "m",
-         "raise_immediately": RuntimeError("simulated crash")},
-        {"name": "S2", "model": "m", "responses": [_verdict_json(True)]},
+async def test_review_with_panel_charlie_sees_a_and_b():
+    """In panel mode, Charlie's user prompt must contain A's AND B's verdicts."""
+    panel = _RecordingPanel([
+        _verdict_json(True, summary="A-distinct-text"),
+        _verdict_json(True, summary="B-distinct-text"),
+        _verdict_json(True, summary="C ok"),
+        _consensus_json(True, consensus="ok"),
     ])
-    client = FakeLMClient([_consensus_json(True, consensus="2-of-3 approved")])
-    out = await review_with_dialogue(
-        "x", "p", {"f.py": "."}, lm_client=client, reasoning_panel=panel,
-    )
-    # The crashing slot returns the empty-string fallback which normalizes
-    # to the default-approved verdict (same as a parse-failure fallback in
-    # the v0.4 path). Pipeline still returns a clean dict.
-    assert "approved" in out
-    assert "issues" in out
-    assert "agents" in out
-    assert len(out["agents"]) == 4  # 3 slots + consensus
-    # The good slots' providers were each called exactly once.
-    assert len(providers[0].calls) == 1
-    assert len(providers[2].calls) == 1
-
-
-async def test_review_panel_slot_role_and_system_prompt_forwarded():
-    """Each slot's call should carry its role decoration + the canonical
-    review system prompt (AGENT_A for slot 0, AGENT_B for the rest)."""
-    from round_robin.code_review import AGENT_A_SYSTEM, AGENT_B_SYSTEM
-
-    panel, providers = _make_panel([
-        {"name": "Primary", "model": "m0", "role": "pragmatic engineer",
-         "responses": [_verdict_json(True)]},
-        {"name": "Critic", "model": "m1", "role": "rigorous code critic",
-         "responses": [_verdict_json(True)]},
-    ])
-    client = FakeLMClient([_consensus_json(True, consensus="ok")])
     await review_with_dialogue(
-        "x", "p", {"f.py": "."}, lm_client=client, reasoning_panel=panel,
+        "x", "p", {"f.py": "."},
+        lm_client=None, reasoning_panel=panel,  # type: ignore[arg-type]
     )
+    # Third consult call = Charlie. Its user message must reference A & B.
+    c_user = panel.consult_calls[2]["messages"][1]["content"]
+    assert "PRIOR VERDICT FROM AGENT A" in c_user
+    assert "PRIOR VERDICT FROM AGENT B" in c_user
+    assert "A-distinct-text" in c_user
+    assert "B-distinct-text" in c_user
 
-    # Slot 0: AGENT_A_SYSTEM in the system message + role decoration.
-    s0_msgs = providers[0].calls[0]["messages"]
-    s0_sys = next(m["content"] for m in s0_msgs if m["role"] == "system")
-    assert AGENT_A_SYSTEM in s0_sys
-    assert "pragmatic engineer" in s0_sys
 
-    # Slot 1: AGENT_B_SYSTEM in the system message + role decoration.
-    s1_msgs = providers[1].calls[0]["messages"]
-    s1_sys = next(m["content"] for m in s1_msgs if m["role"] == "system")
-    assert AGENT_B_SYSTEM in s1_sys
-    assert "rigorous code critic" in s1_sys
+async def test_review_with_panel_tolerates_panel_failure():
+    """If panel.consult raises mid-review, fall back gracefully (best-effort)."""
+
+    class _FailingPanel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def consult(self, messages, **kwargs):
+            self.calls += 1
+            if self.calls == 2:  # B raises
+                raise RuntimeError("simulated panel failure")
+
+            class _R:
+                pass
+
+            r = _R()
+            r.aggregated = _verdict_json(True, summary="ok")
+            return r
+
+    panel = _FailingPanel()
+    out = await review_with_dialogue(
+        "x", "p", {"f.py": "."},
+        lm_client=None, reasoning_panel=panel,  # type: ignore[arg-type]
+    )
+    # Pipeline still produces a clean verdict (B defaulted to approved).
+    assert "approved" in out
+    assert "agents" in out
+    assert set(out["agents"].keys()) == {
+        "agent_a_verdict", "agent_b_verdict", "agent_c_verdict", "consensus",
+    }
+    # All 4 voices were attempted.
+    assert panel.calls == 4

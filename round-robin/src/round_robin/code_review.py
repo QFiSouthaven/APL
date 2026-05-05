@@ -1,8 +1,10 @@
 """Multi-LLM code review pipeline.
 
-Two LLM agents critique a layer in turn (Agent A first, then Agent B with
-A's verdict in context), then a third call synthesizes a unified verdict
-in the shape that ``development.reviewers.RoundRobinReviewer`` consumes:
+Three LLM agents critique a layer in turn (Agent A first, then Agent B
+with A's verdict in context, then Agent C / "Charlie the synthesist"
+with both prior verdicts in context), then a fourth call synthesizes a
+unified verdict in the shape that
+``development.reviewers.RoundRobinReviewer`` consumes:
 
     {
         "approved": bool,
@@ -11,6 +13,7 @@ in the shape that ``development.reviewers.RoundRobinReviewer`` consumes:
         "agents": {
             "agent_a_verdict": str,
             "agent_b_verdict": str,
+            "agent_c_verdict": str,
             "consensus": str,
         },
     }
@@ -18,15 +21,16 @@ in the shape that ``development.reviewers.RoundRobinReviewer`` consumes:
 The first three keys are the load-bearing contract (matches
 ``ReviewerStage`` exactly). ``agents`` is round-robin-specific extra
 metadata that development ignores but that's nice for observability.
+The ``agent_c_verdict`` key is additive — clients that only read the
+load-bearing keys are unaffected.
 
-The dialogue is bounded: exactly 3 LM calls per review (Agent A,
-Agent B, Consensus). No retry loops; if a call fails we fall back to a
-conservative approve verdict — review-fallback consistent with
-``ReviewerStage``'s best-effort behavior.
+The dialogue is bounded: exactly 4 LM calls per review (Agent A,
+Agent B, Agent C, Consensus). No retry loops; if a call fails we fall
+back to a conservative approve verdict — review-fallback consistent
+with ``ReviewerStage``'s best-effort behavior.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -61,10 +65,23 @@ AGENT_B_SYSTEM = (
     "Output only the JSON, no prose."
 )
 
+AGENT_C_SYSTEM = (
+    "You are a synthesist reviewing the same code TWO other engineers "
+    "have already critiqued. Their verdicts are included below. Your "
+    "job is to look for hidden tradeoffs they BOTH missed and surface "
+    "second-order risks: operational concerns (deployment, observability, "
+    "rollout), security implications, and long-term maintenance burden. "
+    "Don't repeat what they already flagged unless you can sharpen it. "
+    "Output JSON ONLY in the same shape: "
+    '{"approved": bool, "issues": ["..."], "request_regenerate": bool, '
+    '"summary": "1-line takeaway"}. '
+    "Output only the JSON, no prose."
+)
+
 CONSENSUS_SYSTEM = (
-    "You are a tech lead reconciling two engineers' code reviews. "
-    "Given both verdicts, produce a unified verdict. The build is "
-    "approved IFF both engineers approved. The build needs "
+    "You are a tech lead reconciling three engineers' code reviews. "
+    "Given all three verdicts, produce a unified verdict. The build is "
+    "approved IFF all three engineers approved. The build needs "
     "regeneration IFF at least one engineer flagged a mechanical bug "
     "AND requested regenerate. Aggregate distinct issues. Output JSON "
     'ONLY: {"approved": bool, "issues": ["..."], "request_regenerate": bool, '
@@ -197,17 +214,44 @@ def _build_user_prompt_with_prior(
     )
 
 
+def _build_user_prompt_with_two_priors(
+    layer: str,
+    purpose: str,
+    files: dict[str, str],
+    agent_a_verdict: dict[str, Any],
+    agent_b_verdict: dict[str, Any],
+) -> str:
+    """Agent C (Charlie) prompt: code + Agent A's AND Agent B's verdicts."""
+    a_json = json.dumps(agent_a_verdict, indent=2)
+    b_json = json.dumps(agent_b_verdict, indent=2)
+    return (
+        f"LAYER: {layer}\n"
+        f"PURPOSE: {purpose}\n\n"
+        f"FILES:\n{_format_files(files)}\n\n"
+        f"PRIOR VERDICT FROM AGENT A:\n{a_json}\n\n"
+        f"PRIOR VERDICT FROM AGENT B:\n{b_json}\n\n"
+        "Look for hidden tradeoffs and second-order risks both prior "
+        "reviewers missed. Output your JSON verdict only."
+    )
+
+
 def _build_consensus_prompt(
     layer: str,
     agent_a: dict[str, Any],
     agent_b: dict[str, Any],
+    agent_c: dict[str, Any] | None = None,
 ) -> str:
-    return (
-        f"LAYER: {layer}\n\n"
-        f"AGENT A VERDICT:\n{json.dumps(agent_a, indent=2)}\n\n"
-        f"AGENT B VERDICT:\n{json.dumps(agent_b, indent=2)}\n\n"
-        "Reconcile the two verdicts and emit the unified JSON."
-    )
+    parts = [
+        f"LAYER: {layer}\n",
+        f"AGENT A VERDICT:\n{json.dumps(agent_a, indent=2)}\n",
+        f"AGENT B VERDICT:\n{json.dumps(agent_b, indent=2)}\n",
+    ]
+    if agent_c is not None:
+        parts.append(f"AGENT C VERDICT:\n{json.dumps(agent_c, indent=2)}\n")
+        parts.append("Reconcile the three verdicts and emit the unified JSON.")
+    else:
+        parts.append("Reconcile the two verdicts and emit the unified JSON.")
+    return "\n".join(parts)
 
 
 # ── Main entrypoint ────────────────────────────────────────────────────
@@ -223,14 +267,17 @@ async def review_with_dialogue(
     model: str | None = None,
     reasoning_panel: ReasoningPanel | None = None,  # type: ignore[valid-type]
 ) -> dict[str, Any]:
-    """Two-pass code review with consensus synthesis.
+    """Three-voice code review with consensus synthesis.
 
     Pass 1: Agent A (the 'pragmatic engineer') reviews the code with
             focus on correctness + readability.
     Pass 2: Agent B (the 'rigorous critic') reviews the SAME code AND
             sees Agent A's verdict, with focus on edge cases + bugs.
-    Pass 3: Consensus synthesis — fold both verdicts into the unified
-            shape ReviewerStage expects.
+    Pass 3: Agent C (the 'synthesist' / "Charlie") reviews the SAME code
+            AND sees both A's and B's verdicts. Focus: hidden tradeoffs
+            and second-order risks (operational, security, maintenance).
+    Pass 4: Consensus synthesis — fold all three verdicts into the
+            unified shape ReviewerStage expects.
 
     Returns: dict matching the API response shape.
 
@@ -239,14 +286,13 @@ async def review_with_dialogue(
     fail the whole review). On TRANSPORT failures (LM Studio unreachable,
     HTTP errors) we let the exception propagate — the caller renders 503.
 
-    When ``reasoning_panel`` is provided, the first ``len(panel)`` slots
-    emit verdicts in parallel (each acting as an independent reviewer);
-    deterministic aggregation rules apply across ALL slot verdicts (any
-    rejection rejects, OR for regenerate, dedup-merge issues). The
-    CONSENSUS_SYSTEM call still runs as a final reconciler driven by the
-    ``lm_client`` (or the slot 0 provider as a fallback). The ``agents``
-    field in the response grows to include one entry per slot
-    (``agent_<n>_verdict``) plus ``consensus``.
+    When ``reasoning_panel`` is provided, EACH voice (A, B, C, Consensus)
+    consults the panel instead of the single ``lm_client``. This lets
+    each voice itself be a panel of N reasoning slots — every slot of
+    every voice contributes its verdict, and aggregation is applied
+    across the whole pool. The ``agents`` field in the response grows
+    to include one entry per slot (``agent_<n>_verdict``) plus
+    ``consensus``.
     """
     del timeout_per_call  # accepted for API stability; LMLinkClient owns its own timeouts
     review_model = model or ""
@@ -282,18 +328,31 @@ async def review_with_dialogue(
     b_raw = await client.chat(b_messages, model=review_model, temperature=0.2)
     b_verdict = _normalize_agent_verdict(_parse_json(b_raw))
 
-    # ── Pass 3: Consensus synthesis ────────────────────────────────────
+    # ── Pass 3: Agent C / Charlie (sees A's AND B's verdicts) ──────────
     c_messages = [
-        {"role": "system", "content": CONSENSUS_SYSTEM},
+        {"role": "system", "content": AGENT_C_SYSTEM},
         {
             "role": "user",
-            "content": _build_consensus_prompt(layer, a_verdict, b_verdict),
+            "content": _build_user_prompt_with_two_priors(
+                layer, purpose, files, a_verdict, b_verdict,
+            ),
         },
     ]
     c_raw = await client.chat(c_messages, model=review_model, temperature=0.2)
-    c_parsed = _parse_json(c_raw)
+    c_verdict = _normalize_agent_verdict(_parse_json(c_raw))
 
-    if c_parsed is None:
+    # ── Pass 4: Consensus synthesis ────────────────────────────────────
+    cons_messages = [
+        {"role": "system", "content": CONSENSUS_SYSTEM},
+        {
+            "role": "user",
+            "content": _build_consensus_prompt(layer, a_verdict, b_verdict, c_verdict),
+        },
+    ]
+    cons_raw = await client.chat(cons_messages, model=review_model, temperature=0.2)
+    cons_parsed = _parse_json(cons_raw)
+
+    if cons_parsed is None:
         # Consensus parse failed — fall back, but preserve agent verdicts
         # for observability. We DON'T compute the consensus deterministically
         # here because the spec specifically asks for the LLM-driven path
@@ -304,20 +363,28 @@ async def review_with_dialogue(
         request_regenerate = bool(_FALLBACK_VERDICT["request_regenerate"])
     else:
         # Apply the deterministic aggregation rules on top of the LLM's
-        # synthesis: approve IFF both agents approved; regenerate IFF at
-        # least one agent flagged regenerate. The LLM's `consensus` text
+        # synthesis: approve IFF all three voices approved; regenerate IFF
+        # at least one voice flagged regenerate. The LLM's `consensus` text
         # is preserved as the prose synthesis. This guarantees the rules
         # hold even if the LLM gets the booleans wrong.
-        approved = bool(a_verdict["approved"]) and bool(b_verdict["approved"])
-        request_regenerate = bool(
-            a_verdict["request_regenerate"] or b_verdict["request_regenerate"]
+        approved = (
+            bool(a_verdict["approved"])
+            and bool(b_verdict["approved"])
+            and bool(c_verdict["approved"])
         )
-        issues = _merge_issues(a_verdict["issues"], b_verdict["issues"])
+        request_regenerate = bool(
+            a_verdict["request_regenerate"]
+            or b_verdict["request_regenerate"]
+            or c_verdict["request_regenerate"]
+        )
+        issues = _merge_issues(
+            a_verdict["issues"], b_verdict["issues"], c_verdict["issues"],
+        )
         # Add issues the LLM consensus call surfaced if they're new.
-        c_issues_raw = c_parsed.get("issues") or []
-        if isinstance(c_issues_raw, list):
-            issues = _merge_issues(issues, [str(i) for i in c_issues_raw if i])
-        consensus_raw = c_parsed.get("consensus")
+        cons_issues_raw = cons_parsed.get("issues") or []
+        if isinstance(cons_issues_raw, list):
+            issues = _merge_issues(issues, [str(i) for i in cons_issues_raw if i])
+        consensus_raw = cons_parsed.get("consensus")
         consensus_text = (
             consensus_raw if isinstance(consensus_raw, str) and consensus_raw.strip()
             else _summarize_consensus(approved, request_regenerate, len(issues))
@@ -330,6 +397,7 @@ async def review_with_dialogue(
         "agents": {
             "agent_a_verdict": _short(a_verdict),
             "agent_b_verdict": _short(b_verdict),
+            "agent_c_verdict": _short(c_verdict),
             "consensus": consensus_text,
         },
     }
@@ -338,21 +406,27 @@ async def review_with_dialogue(
 # ── Panel-driven review path ───────────────────────────────────────────
 
 
-async def _call_slot_for_review(
-    slot: Any,
-    messages: list[dict[str, Any]],
+async def _consult_voice(
+    panel: ReasoningPanel,  # type: ignore[valid-type]
+    system_prompt: str,
+    user_prompt: str,
 ) -> str:
-    """Invoke one slot's chat(); return the raw string. Errors are CAPTURED
-    and surfaced as an empty string so a single crashing slot doesn't kill
-    the whole review (matches the existing best-effort fallback).
+    """Call ``panel.consult`` once for one voice. Returns the aggregated
+    string. Errors are captured and surfaced as an empty string so a
+    crashing panel doesn't kill the whole review (matches the existing
+    best-effort fallback).
     """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
     try:
-        return await slot.provider.chat(
-            messages, model=slot.model, temperature=0.2,
-        )
+        result = await panel.consult(messages, temperature=0.2)
     except Exception as exc:  # noqa: BLE001 — best-effort tolerance
-        logger.warning("Panel slot %r raised during review: %s", slot.name, exc)
+        logger.warning("Panel.consult raised during review: %s", exc)
         return ""
+    aggregated = getattr(result, "aggregated", "")
+    return aggregated if isinstance(aggregated, str) else ""
 
 
 async def _review_with_panel(
@@ -364,108 +438,89 @@ async def _review_with_panel(
     lm_client: Any | None,
     review_model: str,
 ) -> dict[str, Any]:
-    """Run a panel-driven review.
+    """Run a panel-driven review where each voice (A, B, C, Consensus)
+    consults the panel.
 
-    All ``len(panel)`` slots emit verdicts in parallel; deterministic
-    aggregation rules apply across every slot. The consensus call still
-    runs (via lm_client if provided, else slot 0's provider).
+    Four panel consultations total. Each voice's call returns an
+    aggregated string (per the panel's mode + aggregator); we parse it
+    as JSON and feed it through the same deterministic aggregation rules
+    as the non-panel path:
 
-    Each slot sees a system prompt blended from its own ``role`` (when
-    present) and ``AGENT_A_SYSTEM`` so its output shape stays compatible
-    with :func:`_parse_json`. Slot 0 keeps the AGENT_A persona; remaining
-    slots get AGENT_B-style prompting (with the layer's purpose) so they
-    aren't all reviewing in the same exact mode.
+      * approved IFF A.approved ∧ B.approved ∧ C.approved
+      * request_regenerate IFF any voice flagged it
+      * issues = dedup-merge across A, B, C, plus any new issues the
+        consensus LLM surfaced
+
+    The ``agents`` block carries one entry per voice:
+    ``{"agent_a_verdict", "agent_b_verdict", "agent_c_verdict", "consensus"}``.
+    Identical shape to the non-panel path so callers don't need to
+    branch on whether a panel was supplied.
     """
-    slots = list(panel.slots)
-    user_prompt = _build_user_prompt(layer, purpose, files)
+    del lm_client, review_model  # panel mode routes everything through panel.consult
 
-    async def _one_slot(idx: int, slot: Any) -> dict[str, Any]:
-        # Slot 0 acts as the pragmatic Agent A; the rest use the rigorous
-        # Agent B prompting so they hunt for bugs the primary missed.
-        # Role-decorated system prepended (if any) before the canonical
-        # review system prompt.
-        review_system = AGENT_A_SYSTEM if idx == 0 else AGENT_B_SYSTEM
-        deco = slot.system_decoration() if hasattr(slot, "system_decoration") else ""
-        system_content = (
-            f"{deco}\n\n{review_system}" if deco else review_system
-        )
-        messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_prompt},
-        ]
-        raw = await _call_slot_for_review(slot, messages)
-        return _normalize_agent_verdict(_parse_json(raw))
+    user_prompt_a = _build_user_prompt(layer, purpose, files)
 
-    # Run all slots in parallel.
-    verdicts: list[dict[str, Any]] = await asyncio.gather(
-        *(_one_slot(i, s) for i, s in enumerate(slots))
+    # ── Voice A ────────────────────────────────────────────────────────
+    a_raw = await _consult_voice(panel, AGENT_A_SYSTEM, user_prompt_a)
+    a_verdict = _normalize_agent_verdict(_parse_json(a_raw))
+
+    # ── Voice B (sees A's verdict) ─────────────────────────────────────
+    user_prompt_b = _build_user_prompt_with_prior(layer, purpose, files, a_verdict)
+    b_raw = await _consult_voice(panel, AGENT_B_SYSTEM, user_prompt_b)
+    b_verdict = _normalize_agent_verdict(_parse_json(b_raw))
+
+    # ── Voice C / Charlie (sees A's AND B's verdicts) ──────────────────
+    user_prompt_c = _build_user_prompt_with_two_priors(
+        layer, purpose, files, a_verdict, b_verdict,
+    )
+    c_raw = await _consult_voice(panel, AGENT_C_SYSTEM, user_prompt_c)
+    c_verdict = _normalize_agent_verdict(_parse_json(c_raw))
+
+    # Deterministic aggregation across A/B/C.
+    approved = (
+        bool(a_verdict["approved"])
+        and bool(b_verdict["approved"])
+        and bool(c_verdict["approved"])
+    )
+    request_regenerate = (
+        bool(a_verdict["request_regenerate"])
+        or bool(b_verdict["request_regenerate"])
+        or bool(c_verdict["request_regenerate"])
+    )
+    issues = _merge_issues(
+        a_verdict["issues"], b_verdict["issues"], c_verdict["issues"],
     )
 
-    # Deterministic aggregation across all slot verdicts.
-    approved = all(bool(v["approved"]) for v in verdicts)
-    request_regenerate = any(bool(v["request_regenerate"]) for v in verdicts)
-    issues = _merge_issues(*(v["issues"] for v in verdicts))
+    # ── Voice Consensus ────────────────────────────────────────────────
+    consensus_user_prompt = _build_consensus_prompt(
+        layer, a_verdict, b_verdict, c_verdict,
+    )
+    cons_raw = await _consult_voice(panel, CONSENSUS_SYSTEM, consensus_user_prompt)
+    cons_parsed = _parse_json(cons_raw)
 
-    # ── Consensus pass (still runs, like v0.4) ─────────────────────────
-    # Build the consensus prompt from all slot verdicts so the LLM has the
-    # full picture. Use the lm_client when supplied, else slot 0's
-    # provider as the consensus reconciler.
-    consensus_prompt = _build_consensus_prompt_n(layer, verdicts)
-    c_messages = [
-        {"role": "system", "content": CONSENSUS_SYSTEM},
-        {"role": "user", "content": consensus_prompt},
-    ]
-    consensus_text: str
-    try:
-        if lm_client is not None:
-            c_raw = await lm_client.chat(
-                c_messages, model=review_model, temperature=0.2,
-            )
-        else:
-            c_raw = await slots[0].provider.chat(
-                c_messages, model=slots[0].model, temperature=0.2,
-            )
-        c_parsed = _parse_json(c_raw)
-    except Exception as exc:  # noqa: BLE001 — best-effort
-        logger.warning("Panel consensus call failed: %s", exc)
-        c_parsed = None
-
-    if c_parsed is None:
+    if cons_parsed is None:
         consensus_text = _FALLBACK_VERDICT["consensus"]
     else:
-        c_issues_raw = c_parsed.get("issues") or []
-        if isinstance(c_issues_raw, list):
-            issues = _merge_issues(issues, [str(i) for i in c_issues_raw if i])
-        consensus_raw = c_parsed.get("consensus")
+        cons_issues_raw = cons_parsed.get("issues") or []
+        if isinstance(cons_issues_raw, list):
+            issues = _merge_issues(issues, [str(i) for i in cons_issues_raw if i])
+        consensus_raw = cons_parsed.get("consensus")
         consensus_text = (
             consensus_raw if isinstance(consensus_raw, str) and consensus_raw.strip()
             else _summarize_consensus(approved, request_regenerate, len(issues))
         )
 
-    # Build agents block: one entry per slot, plus consensus.
-    agents: dict[str, Any] = {}
-    for i, v in enumerate(verdicts):
-        agents[f"agent_{i}_verdict"] = _short(v)
-    agents["consensus"] = consensus_text
-
     return {
         "approved": approved,
         "issues": issues,
         "request_regenerate": request_regenerate,
-        "agents": agents,
+        "agents": {
+            "agent_a_verdict": _short(a_verdict),
+            "agent_b_verdict": _short(b_verdict),
+            "agent_c_verdict": _short(c_verdict),
+            "consensus": consensus_text,
+        },
     }
-
-
-def _build_consensus_prompt_n(
-    layer: str,
-    verdicts: list[dict[str, Any]],
-) -> str:
-    """Render the n-slot consensus prompt (one block per slot)."""
-    parts = [f"LAYER: {layer}\n"]
-    for i, v in enumerate(verdicts):
-        parts.append(f"AGENT {i} VERDICT:\n{json.dumps(v, indent=2)}\n")
-    parts.append("Reconcile all verdicts and emit the unified JSON.")
-    return "\n".join(parts)
 
 
 def _merge_issues(*lists: list[str]) -> list[str]:
