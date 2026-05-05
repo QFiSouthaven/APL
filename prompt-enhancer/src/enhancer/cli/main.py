@@ -323,6 +323,11 @@ from .extras import register as _register_extras  # noqa: E402
 
 _register_extras(app)
 
+# Wire the `services` sub-app (show / init / path).
+from ._services import register as _register_services  # noqa: E402
+
+_register_services(app)
+
 
 if __name__ == "__main__":
     app()
