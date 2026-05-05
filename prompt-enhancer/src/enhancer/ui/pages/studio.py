@@ -406,21 +406,30 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
                     )
                     ui.markdown(f"```\n{bravo}\n```")
 
-    async def _on_round_robin_personas_click() -> None:
+    async def _send_personas_to_round_robin(*, silent_on_skip: bool) -> None:
+        """Single shared path for manual button + auto-fire-on-completion.
+
+        ``silent_on_skip=True`` is for auto-fire: when there's nothing
+        useful to send (no run yet, no Persona A), bail without toasts.
+        ``silent_on_skip=False`` is for the manual button: warn the user
+        why nothing happened so a click never feels broken.
+        """
         result = state.get("last_result")
         if result is None:
-            ui.notify("No completed run yet.", color="warning")
+            if not silent_on_skip:
+                ui.notify("No completed run yet.", color="warning")
             return
         alpha = getattr(result, "persona", None) or ""
         if not alpha:
-            ui.notify(
-                "No Persona A — enable Persona mode and re-run before "
-                "handing off.",
-                color="warning",
-            )
+            if not silent_on_skip:
+                ui.notify(
+                    "No Persona A — enable Persona mode and re-run before "
+                    "handing off.",
+                    color="warning",
+                )
             return
         bravo = getattr(result, "persona_partner", None) or ""
-        if not bravo:
+        if not bravo and not silent_on_skip:
             ui.notify(
                 "Sending Persona A only; Bravo will keep its existing "
                 "persona.",
@@ -449,7 +458,10 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
         if outcome.status == "ok":
             ui.notify("Personas delivered to Round Robin.", color="positive")
         elif outcome.status == "peer_missing":
-            ui.notify(outcome.error, color="warning")
+            # On auto-fire, this is informational not actionable — the user
+            # didn't ask for the handoff to happen.
+            color = "info" if silent_on_skip else "warning"
+            ui.notify(outcome.error, color=color)
         elif outcome.status == "unreachable":
             ui.notify(
                 f"Round-robin unreachable: {outcome.error}",
@@ -459,6 +471,12 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
             ui.notify(
                 f"Round-robin error: {outcome.error}", color="negative"
             )
+
+    async def _on_round_robin_personas_click() -> None:
+        await _send_personas_to_round_robin(silent_on_skip=False)
+
+    # Exposed on state so the post-run hook can fire it without a click.
+    state["_send_personas_to_round_robin"] = _send_personas_to_round_robin
 
     rr_persona_btn.on_click(_on_round_robin_personas_click)
 
@@ -792,6 +810,25 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
             f"({chosen_model})",
             color="positive",
         )
+
+        # Auto-fire the persona handoff to round-robin when the user
+        # opted in by ticking "Generate partner persona" AND we have a
+        # populated Persona B. The manual button stays as a re-fire path
+        # for cases where round-robin was offline the first time.
+        # Silent on skip: if Persona A or B is empty for any reason,
+        # bail without surfacing a "nothing to send" toast — the user
+        # didn't explicitly click anything.
+        try:
+            if (
+                complement_persona_sw.value
+                and getattr(result, "persona", None)
+                and getattr(result, "persona_partner", None)
+            ):
+                await _send_personas_to_round_robin(silent_on_skip=True)
+        except Exception as exc:  # noqa: BLE001 — never fail run-complete
+            ui.notify(
+                f"Auto-handoff failed: {exc}", color="negative"
+            )
 
     run_btn.on_click(_run_pipeline_action)
 
