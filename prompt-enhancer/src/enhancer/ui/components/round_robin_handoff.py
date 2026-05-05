@@ -206,4 +206,11 @@ async def post_persona_handoff(
         )
 
     # Persona handoff is fire-and-acknowledge: no verdict to surface.
+    # Stamp the activity feed so the user sees the outgoing event next
+    # to round-robin's incoming event after the cross-umbrella merge.
+    try:
+        from ...api.activity import record_persona_handoff
+        record_persona_handoff(peer_name, theme, alpha_persona, bravo_persona)
+    except Exception:  # noqa: BLE001
+        pass
     return HandoffResult(status="ok", http_status=resp.status_code)

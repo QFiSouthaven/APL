@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__
+from . import activity as activity_module
 from .config import SETTINGS
 from .discovery import get_all_peers
 from .llm_client import LLMClient
@@ -149,6 +150,26 @@ def create_app(
     @app.get("/api/peers")
     async def get_peers() -> JSONResponse:
         return JSONResponse({"services": get_all_peers()})
+
+    # ── /api/activity ────────────────────────────────────────────
+    @app.get("/api/activity")
+    async def get_activity(limit: int = 50) -> JSONResponse:
+        # Cross-umbrella activity feed. Same wire shape as
+        # round-robin + prompt-enhancer. Reads from the existing
+        # MessageBoard rather than maintaining a parallel buffer —
+        # see development.activity for the rationale.
+        if limit < 1:
+            limit = 1
+        if limit > 200:
+            limit = 200
+        return JSONResponse(
+            {
+                "service": "development",
+                "events": activity_module.snapshot_from_board(
+                    message_board, limit=limit
+                ),
+            }
+        )
 
     # ── /api/build ───────────────────────────────────────────────
     @app.post("/api/build")

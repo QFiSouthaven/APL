@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__
+from . import activity as activity_module
 from .charlie.workspace import CharlieWorkspace, SandboxError, get_current as charlie_get_current
 from .code_review import review_with_dialogue
 from .config import STATE_FILE, STATIC_DIR, ensure_dirs
@@ -174,6 +175,10 @@ def create_app() -> FastAPI:
     monitor.set_broadcast(_broadcast_error)
 
     async def emit(event: str, **fields: Any) -> None:
+        # Cross-umbrella activity feed: stamp the ring buffer first so a
+        # later broadcast crash never loses the event from /api/activity.
+        # record_emit is best-effort (swallows exceptions internally).
+        activity_module.record_emit(event, fields)
         # Auto-capture any '*_error' event into the monitor before broadcasting.
         if event.endswith("_error") and "error" in fields:
             category = event[:-len("_error")] or "system"
@@ -245,6 +250,20 @@ def create_app() -> FastAPI:
         # `{"services": {<name>: <url>, ...}}` so cross-product code can
         # treat the two surfaces identically.
         return JSONResponse({"services": get_all_peers()})
+
+    @app.get("/api/activity")
+    async def get_activity(limit: int = 50) -> JSONResponse:
+        # Cross-umbrella activity feed. Same wire shape as
+        # prompt-enhancer + development. Bounds are clamped to
+        # [1, 200] silently — no 422 for the Studio panel.
+        if limit < 1:
+            limit = 1
+        if limit > 200:
+            limit = 200
+        return JSONResponse({
+            "service": "round_robin",
+            "events": activity_module.snapshot(limit),
+        })
 
     @app.get("/api/models")
     async def get_models() -> JSONResponse:
@@ -515,6 +534,7 @@ def create_app() -> FastAPI:
         return 503 with a string ``error`` so the dev-side reviewer can
         treat it the same as 404 (deferred-mode fallback).
         """
+        activity_module.record_review_request(body.layer)
         try:
             verdict = await review_with_dialogue(
                 layer=body.layer,
@@ -561,6 +581,9 @@ def create_app() -> FastAPI:
         }
         async with handoff_lock:
             handoff_state["pending"] = payload
+        # Stamp the umbrella activity feed so the user sees the
+        # incoming handoff next to prompt-enhancer's outgoing one.
+        activity_module.record_persona_handoff_received(body.theme, body.source)
         return JSONResponse({"status": "ok", "stored_at": stored_at})
 
     @app.get("/api/persona-handoff")

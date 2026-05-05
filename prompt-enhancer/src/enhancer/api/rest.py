@@ -23,6 +23,8 @@ from pydantic import BaseModel, Field
 from dataclasses import fields
 
 from . import ENVELOPE_SCHEMA_VERSION
+from . import activity as activity_module
+from .activity import make_pipeline_recorder, record as activity_record
 from .discovery import get_all_peers, get_peer_url
 from .. import __version__
 from ..config import Settings, db_path, jsonl_log_path, load, save_settings
@@ -99,6 +101,17 @@ async def health() -> HealthResponse:
 async def peers() -> dict[str, dict[str, str]]:
     """Return the configured peer service URLs."""
     return {"services": get_all_peers()}
+
+
+@router.get("/activity")
+async def activity(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+    """Return recent pipeline events as a cross-umbrella activity feed.
+
+    Wire shape is identical across siblings (round-robin, development).
+    Events are newest-first, ring-buffered, ephemeral (no persistence).
+    See ``enhancer.api.activity`` for the contract.
+    """
+    return {"service": "prompt_enhancer", "events": activity_module.snapshot(limit)}
 
 
 @router.get("/runs")
@@ -260,11 +273,16 @@ async def enhance(req: EnhanceRequest) -> EnhancedEnvelope:
     pending: dict[str, dict] = {}
     captured: dict[str, Any] = {}
 
-    async def _on_event(event_type, **payload):
+    async def _capture(event_type, **payload):
         name = event_type.value if hasattr(event_type, "value") else str(event_type)
         if name == EventType.AGENT_DISAMBIGUATE.value:
             captured["disambig_id"] = payload.get("disambig_id")
             captured["questions"] = payload.get("questions") or []
+
+    # Wrap the inner callback with the activity recorder so every run's
+    # lifecycle events show up on /api/activity for the umbrella feed.
+    _on_event = make_pipeline_recorder(req.prompt)
+    _on_event.set_inner(_capture)
 
     opts = PipelineOptions(
         scorer_model=req.scorer_model,

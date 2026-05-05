@@ -28,8 +28,13 @@ import asyncio
 from ...config import db_path, jsonl_log_path, load
 from ...core.events import EventType
 from ...core.pipeline import PipelineOptions, build_resume_state, run_pipeline
+from ...llm.panel_config import (
+    build_panel as build_reasoning_panel,
+    load_panel_config,
+)
 from ...llm.registry import get_provider
 from ...persistence import runs as runs_module
+from ..components.activity_panel import render_activity_panel
 from ..components.diff_view import render_diff
 from ..components.pass_card import render_pass_card
 from ..components.round_robin_handoff import post_persona_handoff, post_review
@@ -114,6 +119,12 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
             live_rate_lbl = ui.label("").classes("text-caption text-grey")
         # Branch badge — visible only when this run was forked from a parent.
         branch_badge = ui.label("").classes("text-caption").style(
+            "color: var(--accent); display: none;"
+        )
+        # Panel badge — visible only when a Reasoning Panel is wired into
+        # the next run. Updated each time we read panel.toml just before
+        # calling run_pipeline. (See _run_pipeline_action below.)
+        panel_badge = ui.label("").classes("text-caption").style(
             "color: var(--accent); display: none;"
         )
 
@@ -252,6 +263,12 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
         with ui.row().classes("gap-2 mt-2"):
             run_btn = ui.button("Enhance", icon="auto_fix_high")
             ui.button("Clear", on_click=lambda: prompt_input.set_value("")).props("flat")
+
+    # ── Live Activity (cross-umbrella feed) — collapsible expansion at
+    # the bottom of the page. Polls all three siblings every 2 s; renders
+    # merged stream so the user can SEE handoffs / runs / builds without
+    # tailing logs. See components/activity_panel.py for the contract.
+    render_activity_panel()
 
     # If we arrived via History page's "Branch from this run" button,
     # preload the parent's prompt so the user can edit then Enhance.
@@ -710,6 +727,35 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
             branch_badge.set_text("")
             branch_badge.style("display: none;")
 
+        # Read the saved Reasoning Panel config; build a live panel if
+        # enabled. Failures are SAFE — we toast a warning and fall back
+        # to a no-panel run rather than crashing the Studio.
+        panel = None
+        panel_kwargs: dict[str, Any] = {}
+        try:
+            panel_cfg = load_panel_config()
+            panel = build_reasoning_panel(panel_cfg)
+        except Exception as exc:  # noqa: BLE001
+            ui.notify(
+                f"Reasoning Panel config invalid — running without panel: {exc}",
+                color="warning",
+            )
+            panel = None
+            panel_cfg = None
+        if panel is not None and panel_cfg is not None:
+            panel_kwargs = dict(
+                reasoning_panel=panel,
+                panel_mode=panel_cfg.mode,
+                panel_aggregator=panel_cfg.aggregator,
+            )
+            panel_badge.set_text(
+                f"Panel: {len(panel.slots)} slots, mode={panel_cfg.mode}"
+            )
+            panel_badge.style("color: var(--accent); display: inline;")
+        else:
+            panel_badge.set_text("")
+            panel_badge.style("display: none;")
+
         run_btn.disable()
         try:
             opts_kwargs: dict[str, Any] = dict(
@@ -743,6 +789,7 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
                 request_timeout=live_settings.request_timeout,
                 idle_timeout=live_settings.idle_timeout,
                 pending_disambig=state["pending_disambig"],
+                **panel_kwargs,
             )
 
             # Disambiguation pause — open modal, resume on user submit.
