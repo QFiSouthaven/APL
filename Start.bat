@@ -6,6 +6,7 @@ REM each /api/health returns 200, and shows a live banner. Ctrl+C in this
 REM window stops the whole umbrella cleanly.
 REM
 REM First time? Run Setup.bat first to create per-sibling venvs.
+REM Ports already in use (WinError 10048)? Run Kill.bat to free them.
 REM
 REM For Studio-only (no round-robin / development), use:
 REM     prompt-enhancer\Start.bat
