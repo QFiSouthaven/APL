@@ -64,6 +64,7 @@ from .transforms import (
 if TYPE_CHECKING:
     from .pipeline_graph import PipelineGraph
     from ..mcp.invoker import MCPToolInvoker
+    from ..llm.reasoning_panel import ReasoningPanel
 
 logger = logging.getLogger("enhancer.core.pipeline")
 
@@ -197,6 +198,9 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
     mcp_invoker: "MCPToolInvoker | None" = None,
     mcp_pre_pass1: list[dict] | None = None,
     mcp_pre_pass3: list[dict] | None = None,
+    reasoning_panel: "ReasoningPanel | None" = None,
+    panel_mode: str = "primary-only",
+    panel_aggregator: str = "primary-wins",
 ) -> PipelineResult:
     """The 4-pass enhancer.
 
@@ -232,6 +236,11 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
     scorer_model = opts.scorer_model or model
     temperature = opts.temperature
     max_tokens_scale = opts.max_tokens_scale
+
+    # v2.1: panel telemetry — populated only when ``reasoning_panel`` is
+    # supplied. Preserves byte-identical behavior when None: the panel
+    # branches are skipped entirely and existing chat_stream paths run.
+    panel_telemetry: dict[str, Any] = {}
 
     # v2.0.1: pipeline_graph validation — fail fast on misconfig before
     # any LLM call. The validator reproduces the three concurrency
@@ -374,25 +383,44 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
                 p1_user = (
                     f"{p1_user}\n\n[MCP CONTEXT]\n{mcp_enrichment}\n[END MCP CONTEXT]"
                 )
-        pass1_chunks: list[str] = []
-        try:
-            async for tok in provider.chat_stream(
-                messages=[
-                    {"role": "system", "content": PASS1_SYSTEM},
-                    {"role": "user", "content": truncate(p1_user, char_budget, "p1")},
-                ],
-                model=model, temperature=temperature,
-                max_tokens=scaled(budgets.analysis, max_tokens_scale),
-                timeout=request_timeout, idle_timeout=idle_timeout,
-            ):
-                pass1_chunks.append(tok)
+        pass1_messages = [
+            {"role": "system", "content": PASS1_SYSTEM},
+            {"role": "user", "content": truncate(p1_user, char_budget, "p1")},
+        ]
+        if reasoning_panel is not None:
+            try:
+                pass1, p1_panel_tel = await _call_panel(
+                    reasoning_panel, pass1_messages,
+                    mode=panel_mode, aggregator=panel_aggregator,
+                    temperature=temperature,
+                    max_tokens=scaled(budgets.analysis, max_tokens_scale),
+                    timeout=request_timeout,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await _emit(on_event, EventType.AGENT_ERROR,
+                            step="pass1", error=str(exc))
+                raise
+            panel_telemetry["pass1"] = p1_panel_tel
+            if pass1:
                 await _emit(on_event, EventType.AGENT_PASS_CHUNK,
-                            pass_number=1, token=tok)
-        except Exception as exc:  # noqa: BLE001
-            await _emit(on_event, EventType.AGENT_ERROR,
-                        step="pass1", error=str(exc))
-            raise
-        pass1 = "".join(pass1_chunks)
+                            pass_number=1, token=pass1)
+        else:
+            pass1_chunks: list[str] = []
+            try:
+                async for tok in provider.chat_stream(
+                    messages=pass1_messages,
+                    model=model, temperature=temperature,
+                    max_tokens=scaled(budgets.analysis, max_tokens_scale),
+                    timeout=request_timeout, idle_timeout=idle_timeout,
+                ):
+                    pass1_chunks.append(tok)
+                    await _emit(on_event, EventType.AGENT_PASS_CHUNK,
+                                pass_number=1, token=tok)
+            except Exception as exc:  # noqa: BLE001
+                await _emit(on_event, EventType.AGENT_ERROR,
+                            step="pass1", error=str(exc))
+                raise
+            pass1 = "".join(pass1_chunks)
         t_after_p1 = time.monotonic()
         p1_duration_ms = int((t_after_p1 - t0) * 1000)
 
@@ -400,25 +428,44 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
         await _emit(on_event, EventType.AGENT_PASS_START,
                     pass_number=2, pass_name=PASS_NAMES[2], model=model)
 
-        pass2_chunks: list[str] = []
-        try:
-            async for tok in provider.chat_stream(
-                messages=[
-                    {"role": "system", "content": PASS2_SYSTEM},
-                    {"role": "user", "content": truncate(prompt, char_budget, "p2")},
-                ],
-                model=model, temperature=temperature,
-                max_tokens=scaled(budgets.analysis, max_tokens_scale),
-                timeout=request_timeout, idle_timeout=idle_timeout,
-            ):
-                pass2_chunks.append(tok)
+        pass2_messages = [
+            {"role": "system", "content": PASS2_SYSTEM},
+            {"role": "user", "content": truncate(prompt, char_budget, "p2")},
+        ]
+        if reasoning_panel is not None:
+            try:
+                pass2, p2_panel_tel = await _call_panel(
+                    reasoning_panel, pass2_messages,
+                    mode=panel_mode, aggregator=panel_aggregator,
+                    temperature=temperature,
+                    max_tokens=scaled(budgets.analysis, max_tokens_scale),
+                    timeout=request_timeout,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await _emit(on_event, EventType.AGENT_ERROR,
+                            step="pass2", error=str(exc))
+                raise
+            panel_telemetry["pass2"] = p2_panel_tel
+            if pass2:
                 await _emit(on_event, EventType.AGENT_PASS_CHUNK,
-                            pass_number=2, token=tok)
-        except Exception as exc:  # noqa: BLE001
-            await _emit(on_event, EventType.AGENT_ERROR,
-                        step="pass2", error=str(exc))
-            raise
-        pass2 = "".join(pass2_chunks)
+                            pass_number=2, token=pass2)
+        else:
+            pass2_chunks: list[str] = []
+            try:
+                async for tok in provider.chat_stream(
+                    messages=pass2_messages,
+                    model=model, temperature=temperature,
+                    max_tokens=scaled(budgets.analysis, max_tokens_scale),
+                    timeout=request_timeout, idle_timeout=idle_timeout,
+                ):
+                    pass2_chunks.append(tok)
+                    await _emit(on_event, EventType.AGENT_PASS_CHUNK,
+                                pass_number=2, token=tok)
+            except Exception as exc:  # noqa: BLE001
+                await _emit(on_event, EventType.AGENT_ERROR,
+                            step="pass2", error=str(exc))
+                raise
+            pass2 = "".join(pass2_chunks)
 
         t1 = time.monotonic()
         p2_duration_ms = int((t1 - t_after_p1) * 1000)
@@ -611,7 +658,7 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
         # No meaningful enhancement — skip scoring entirely.
         scores_fallback = True
     else:
-        async def _run_pass4_bg() -> tuple[str, dict[str, int], float]:
+        async def _run_pass4_bg() -> tuple[str, dict[str, int], float, dict | None]:
             # Pass 4 streams instead of one-shot chat. Reasoning-token
             # models (gpt-oss family) reliably return EMPTY visible
             # content from non-streaming `/chat/completions` because LM
@@ -625,19 +672,29 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
                 "Enhanced:\n"
                 f"{truncate(enhanced, char_budget // 3, 'p4-enh')}"
             )
+            p4_messages = [
+                {"role": "system", "content": PASS4_SYSTEM},
+                {"role": "user", "content": p4_user},
+            ]
+            if reasoning_panel is not None:
+                raw, p4_tel = await _call_panel(
+                    reasoning_panel, p4_messages,
+                    mode=panel_mode, aggregator=panel_aggregator,
+                    temperature=temperature,
+                    max_tokens=scaled(budgets.score, max_tokens_scale),
+                    timeout=request_timeout,
+                )
+                return raw, parse_scores(raw), time.monotonic() - t4_start, p4_tel
             chunks: list[str] = []
             async for tok in provider.chat_stream(
-                messages=[
-                    {"role": "system", "content": PASS4_SYSTEM},
-                    {"role": "user", "content": p4_user},
-                ],
+                messages=p4_messages,
                 model=scorer_model, temperature=temperature,
                 max_tokens=scaled(budgets.score, max_tokens_scale),
                 timeout=request_timeout, idle_timeout=idle_timeout,
             ):
                 chunks.append(tok)
             raw = "".join(chunks)
-            return raw, parse_scores(raw), time.monotonic() - t4_start
+            return raw, parse_scores(raw), time.monotonic() - t4_start, None
 
         pass4_task = asyncio.create_task(_run_pass4_bg())
 
@@ -649,9 +706,11 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
     t4_dur_ms = 0
     if pass4_task is not None:
         try:
-            pass4_text, scores, p4_dur = await pass4_task
+            pass4_text, scores, p4_dur, p4_tel = await pass4_task
             t4_dur_ms = int(p4_dur * 1000)
             scores_fallback = not bool(pass4_text)
+            if p4_tel is not None:
+                panel_telemetry["pass4"] = p4_tel
         except Exception as exc:  # noqa: BLE001
             scores_fallback = True
             await _emit(on_event, EventType.AGENT_ERROR,
@@ -795,6 +854,9 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
                 scores=scores, scores_fallback=scores_fallback,
                 run_id=record.id)
 
+    extras_payload: dict[str, Any] = {"_record": record}
+    if panel_telemetry:
+        extras_payload["panel"] = panel_telemetry
     return PipelineResult(
         result=enhanced, technique=technique, task_type=task_type,
         scores=scores, scores_fallback=scores_fallback,
@@ -802,11 +864,51 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
         magnitude_output=magnitude_output, sot_output=sot_output,
         pass_times_ms=pass_times_ms, model=model,
         scorer_model=scorer_model, run_id=record.id,
-        extras={"_record": record},
+        extras=extras_payload,
     )
 
 
 # ── helpers ─────────────────────────────────────────────────────────
+
+async def _call_panel(
+    panel: "ReasoningPanel",
+    messages: list[dict[str, Any]],
+    *,
+    mode: str,
+    aggregator: str,
+    temperature: float | None,
+    max_tokens: int | None,
+    timeout: float,
+) -> tuple[str, dict[str, Any]]:
+    """Run a panel consultation and shape telemetry for ``extras["panel"]``.
+
+    Mirrors the telemetry shape used by ``development.stages.reviewer``:
+    ``{"primary": <content>, "partners": [{"name", "content", "ms",
+    "error"}, ...]}``. The aggregated text is what the pipeline parses
+    as if it had come from a single ``provider.chat`` call.
+    """
+    result = await panel.consult(
+        messages,
+        mode=mode,
+        aggregator=aggregator,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
+    telemetry = {
+        "primary": result.primary.content,
+        "partners": [
+            {
+                "name": p.slot_name,
+                "content": p.content,
+                "ms": p.duration_ms,
+                "error": p.error,
+            }
+            for p in result.partners
+        ],
+    }
+    return result.aggregated, telemetry
+
 
 async def _run_mcp_hooks(
     invoker: "MCPToolInvoker",
