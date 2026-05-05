@@ -27,6 +27,7 @@ echo.
 echo [ERROR] One or more sibling venvs are missing.
 echo Run Setup.bat first to provision them.
 echo.
+pause
 exit /b 1
 
 :launch
@@ -38,6 +39,7 @@ REM    "nested" — they're sibling subprocesses with their own interpreters.
 call "prompt-enhancer\.venv\Scripts\activate.bat"
 if errorlevel 1 (
     echo [ERROR] failed to activate prompt-enhancer\.venv. Re-run Setup.bat.
+    pause
     exit /b 1
 )
 
@@ -61,5 +63,11 @@ echo (Ctrl+C in this window to stop all three)
 echo.
 
 python "lab\launch.py"
+
+REM Pause after launcher exits so the user sees any error message before
+REM the cmd window closes. Normal Ctrl-C shutdown also lands here.
+echo.
+echo [launch.py exited with code %ERRORLEVEL%]
+pause
 
 endlocal

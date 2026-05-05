@@ -134,9 +134,17 @@ def _start_component(name: str) -> tuple[subprocess.Popen | None, str]:
     health_url = base_url.rstrip("/") + spec["health_path"]
     print(f"[launch] {name}: spawning in {cwd}; health = {health_url}")
 
+    # Resolve command[0] (the venv python.exe) to an ABSOLUTE path before
+    # spawning. On Windows, subprocess.Popen resolves the executable using
+    # the PARENT'S cwd / PATH, not the new `cwd=` we pass. A relative
+    # `.venv/Scripts/python.exe` therefore fails with WinError 2 even when
+    # cwd is set correctly. Using the resolved venv_python from above sidesteps
+    # this entirely and works identically on POSIX.
+    abs_command = [str(venv_python)] + list(command[1:])
+
     try:
         proc = subprocess.Popen(
-            command, cwd=str(cwd),
+            abs_command, cwd=str(cwd),
             # Inherit stdout/stderr so the user sees component logs interleaved.
             # On Windows, CREATE_NEW_PROCESS_GROUP lets us send Ctrl-C cleanly.
             creationflags=(
@@ -145,6 +153,7 @@ def _start_component(name: str) -> tuple[subprocess.Popen | None, str]:
         )
     except OSError as exc:
         print(f"[launch] {name}: spawn failed: {exc}")
+        print(f"[launch]   command was: {abs_command}")
         return None, ""
 
     return proc, health_url
