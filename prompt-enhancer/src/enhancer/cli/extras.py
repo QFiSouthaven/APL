@@ -67,6 +67,7 @@ async def _run_with_auto_resume(
                 opts=PipelineOptions(
                     scorer_model=snapshot.get("scorer_model"),
                     persona_mode=snapshot.get("persona_mode", False),
+                    complement_persona=snapshot.get("complement_persona", False),
                     magnitude_mode=snapshot.get("magnitude_mode", False),
                     sot_mode=snapshot.get("sot_mode", False),
                     session_id=snapshot.get("session_id"),

@@ -5,10 +5,11 @@ here. Adding a new event is fine. **Renaming or repurposing an existing
 event is a v2 migration** — the swarm-agent-dev monolith and the analytics
 dashboard read this contract.
 
-The enum currently carries **36 members across 9 semantic groups**. The
+The enum currently carries **37 members across 10 semantic groups**. The
 30 v1.x members are frozen at their existing names and string values; the
 6 v2.0 additions (provider-health, MCP, branching) were appended in
-semantic-group order without disturbing the v1 ordering. See
+semantic-group order without disturbing the v1 ordering. The 1 v2.0.x
+patch addition (persona-partner) was appended after the v2.0 group. See
 ``docs/MIGRATION.md`` and ``docs/EVENTS.md`` for the v1 → v2 contract
 expansion.
 
@@ -88,6 +89,9 @@ class EventType(str, Enum):
     BRANCHING_FORK         = "branching_fork"
     BRANCHING_MERGE        = "branching_merge"  # reserved for v2.x — not yet emitted
 
+    # ── persona partner (complementary persona for round-robin handoff) ─
+    PERSONA_PARTNER_RESULT = "persona_partner_result"
+
 
 # ── canonical task types & techniques ────────────────────────────────
 
@@ -163,3 +167,7 @@ class PipelineResult:
     scorer_model: str                   # P4 model (may equal model)
     run_id: str                         # uuid persisted to DB
     extras: dict[str, Any] | None = None
+    # v2.0.x — complementary partner persona (round-robin Bravo). None
+    # when ``opts.complement_persona`` is False; defaulted so every
+    # existing constructor call is byte-identical.
+    persona_partner: str | None = None

@@ -27,6 +27,7 @@ class RunRecord:
     task_type: str = ""
     technique: str = "precision"
     persona: str | None = None
+    persona_partner: str | None = None
     pass1_output: str = ""
     pass2_output: str = ""
     pass4_output: str = ""
@@ -67,7 +68,7 @@ def save(record: RunRecord, db_path: Path, jsonl_path: Path | None = None) -> st
                 INSERT INTO runs (
                     id, session_id, parent_run_id, parent_pass,
                     ts, prompt, enhanced_prompt,
-                    task_type, technique, persona,
+                    task_type, technique, persona, persona_partner,
                     pass1_output, pass2_output, pass4_output,
                     magnitude_output, sot_output,
                     pass_times_ms_json,
@@ -77,7 +78,7 @@ def save(record: RunRecord, db_path: Path, jsonl_path: Path | None = None) -> st
                 ) VALUES (
                     ?, ?, ?, ?,
                     ?, ?, ?,
-                    ?, ?, ?,
+                    ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?,
                     ?,
@@ -89,7 +90,8 @@ def save(record: RunRecord, db_path: Path, jsonl_path: Path | None = None) -> st
                 (
                     record.id, record.session_id, record.parent_run_id, record.parent_pass,
                     record.ts, record.prompt, record.enhanced_prompt,
-                    record.task_type or None, record.technique or None, record.persona,
+                    record.task_type or None, record.technique or None,
+                    record.persona, record.persona_partner,
                     record.pass1_output or None, record.pass2_output or None,
                     record.pass4_output or None,
                     record.magnitude_output or None, record.sot_output or None,

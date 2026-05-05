@@ -34,12 +34,29 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 
 def init_db(db_path: Path) -> None:
-    """Create the database file (if missing) and apply the schema."""
+    """Create the database file (if missing) and apply the schema.
+
+    Also applies idempotent additive column migrations for pre-existing
+    databases where the schema is older than the current source. Each
+    migration is wrapped in a try/except so re-applying on an already-
+    migrated DB is a no-op (SQLite raises ``OperationalError`` when a
+    column already exists).
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     schema_sql = SCHEMA_FILE.read_text(encoding="utf-8")
     conn = _connect(db_path)
     try:
         conn.executescript(schema_sql)
+        # Additive column migrations — idempotent; pre-v2.0.x DBs lack
+        # the ``persona_partner`` column added in 2026-05.
+        for stmt in (
+            "ALTER TABLE runs ADD COLUMN persona_partner TEXT",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                # Column already exists — fine.
+                pass
     finally:
         conn.close()
 

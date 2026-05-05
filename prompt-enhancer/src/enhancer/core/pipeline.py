@@ -57,6 +57,8 @@ from .passes import (
 from .transforms import (
     MAGNITUDE_SYSTEM_PROMPT,
     PERSONA_FALLBACK,
+    PERSONA_PARTNER_FALLBACK,
+    PERSONA_PARTNER_SYSTEM,
     PERSONA_SYSTEM,
     SOT_SYSTEM_PROMPT,
 )
@@ -85,6 +87,11 @@ class PipelineOptions:
     scorer_model: str | None = None
     magnitude_mode: bool = False
     persona_mode: bool = False
+    # When True AND ``persona_mode`` is True, runs a SECOND LLM call
+    # after the primary persona to design a complementary "Persona B"
+    # for round-robin's dialogue loop. Off by default — every existing
+    # run is byte-identical when this stays False.
+    complement_persona: bool = False
     sot_mode: bool = False
     session_id: str | None = None
     temperature: float = 0.7
@@ -557,6 +564,59 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
     else:
         t2_effective = t2
 
+    # ── Persona Partner (optional — strict child of persona_mode) ───
+    # Generates a complementary "Persona B" for round-robin's dialogue
+    # loop. Runs ONLY when both flags are on AND the primary persona
+    # came back as a real model output (not the fallback string). Sits
+    # AFTER the existing persona call but BEFORE Pass 3, like its sibling.
+    persona_partner_text: str | None = None
+    persona_partner_time_ms = 0
+    if (
+        opts.persona_mode
+        and opts.complement_persona
+        and persona_text is not None
+        and persona_text != PERSONA_FALLBACK
+    ):
+        tpp0 = time.monotonic()
+        try:
+            partner_user = (
+                f"User prompt:\n"
+                f"{truncate(prompt, char_budget // 3, 'partner-prompt')}\n\n"
+                f"Persona A (already selected):\n{persona_text}\n\n"
+                "Design Persona B per the rules above."
+            )
+            # Same streaming rationale as Pass 4 / Persona A: reasoning-
+            # token models (gpt-oss family) return EMPTY content from
+            # non-streaming /chat/completions. Streaming SSE bypasses
+            # the LM Studio reasoning-block filter.
+            partner_chunks: list[str] = []
+            async for tok in provider.chat_stream(
+                messages=[
+                    {"role": "system", "content": PERSONA_PARTNER_SYSTEM},
+                    {"role": "user", "content": partner_user},
+                ],
+                model=model, temperature=temperature,
+                max_tokens=scaled(budgets.persona, max_tokens_scale),
+                timeout=request_timeout, idle_timeout=idle_timeout,
+            ):
+                partner_chunks.append(tok)
+            partner_raw = "".join(partner_chunks)
+            tpp1 = time.monotonic()
+            persona_partner_text = (
+                parse_persona(partner_raw) or PERSONA_PARTNER_FALLBACK
+            )
+            persona_partner_time_ms = int((tpp1 - tpp0) * 1000)
+            t2_effective = tpp1
+            await _emit(on_event, EventType.PERSONA_PARTNER_RESULT,
+                        persona_partner=persona_partner_text,
+                        raw_output=partner_raw,
+                        duration_ms=persona_partner_time_ms, model=model)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Persona partner detection failed, falling back: %s", exc
+            )
+            persona_partner_text = PERSONA_PARTNER_FALLBACK
+
     # ── Pass 3 — Task-aware Rewrite (streamed) ──────────────────────
     pass3_partial = False
     if branch_state is not None and branch_state["branch_from_pass"] >= 3:
@@ -852,6 +912,8 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
     }
     if persona_time_ms:
         pass_times_ms["persona"] = persona_time_ms
+    if persona_partner_time_ms:
+        pass_times_ms["persona_partner"] = persona_partner_time_ms
 
     await _emit(on_event, EventType.AGENT_PIPELINE_SUMMARY,
                 total_duration_ms=int((time.monotonic() - t0) * 1000),
@@ -871,6 +933,7 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
         task_type=task_type,
         technique=technique,
         persona=persona_text,
+        persona_partner=persona_partner_text,
         pass1_output=pass1,
         pass2_output=pass2,
         pass4_output=pass4_text,
@@ -905,6 +968,7 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
         pass_times_ms=pass_times_ms, model=model,
         scorer_model=scorer_model, run_id=record.id,
         extras=extras_payload,
+        persona_partner=persona_partner_text,
     )
 
 
@@ -1162,6 +1226,7 @@ async def _maybe_disambiguate(
         "scorer_model": opts.scorer_model,
         "magnitude_mode": opts.magnitude_mode,
         "persona_mode": opts.persona_mode,
+        "complement_persona": opts.complement_persona,
         "sot_mode": opts.sot_mode,
         "session_id": opts.session_id,
         "pass1": pass1, "pass2": pass2,

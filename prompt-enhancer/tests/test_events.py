@@ -77,7 +77,14 @@ V2_ADDITIONS: frozenset[str] = frozenset({
     "BRANCHING_MERGE",
 })
 
-EXPECTED_NAMES: frozenset[str] = V1_NAMES | V2_ADDITIONS
+# Members added after v2.0 in additive patches. The enum-frozen rule
+# applies to v1 names only; v2.x is allowed to grow.
+V2_PATCH_ADDITIONS: frozenset[str] = frozenset({
+    # persona partner (1) — round-robin Bravo (v2.0.x patch)
+    "PERSONA_PARTNER_RESULT",
+})
+
+EXPECTED_NAMES: frozenset[str] = V1_NAMES | V2_ADDITIONS | V2_PATCH_ADDITIONS
 
 
 # ── tests ─────────────────────────────────────────────────────────────
@@ -85,9 +92,12 @@ EXPECTED_NAMES: frozenset[str] = V1_NAMES | V2_ADDITIONS
 def test_v1_v2_sets_disjoint() -> None:
     """Sanity check on the test fixtures themselves."""
     assert V1_NAMES.isdisjoint(V2_ADDITIONS)
+    assert V1_NAMES.isdisjoint(V2_PATCH_ADDITIONS)
+    assert V2_ADDITIONS.isdisjoint(V2_PATCH_ADDITIONS)
     assert len(V1_NAMES) == 30
     assert len(V2_ADDITIONS) == 6
-    assert len(EXPECTED_NAMES) == 36
+    assert len(V2_PATCH_ADDITIONS) == 1
+    assert len(EXPECTED_NAMES) == 37
 
 
 def test_all_36_event_names_present() -> None:
@@ -106,7 +116,7 @@ def test_all_36_event_names_present() -> None:
         f"{sorted(extra)}. Update tests/test_events.py and "
         "docs/MIGRATION.md if this addition is intentional."
     )
-    assert len(actual) == 36, f"expected 36 members, got {len(actual)}"
+    assert len(actual) == 37, f"expected 37 members, got {len(actual)}"
 
 
 def test_v2_additions_have_nonempty_values() -> None:

@@ -115,6 +115,11 @@ def enhance(
                                       help="Sampling temperature 0.0–2.0"),
     max_tokens_scale: float = typer.Option(1.0, "--tokens", help="Max-tokens scale 0.3–3.0"),
     persona: bool = typer.Option(False, "--persona", help="Enable persona mode"),
+    complement_persona: bool = typer.Option(
+        False, "--complement-persona",
+        help="With --persona, also generate a complementary partner persona "
+             "(Persona B) for round-robin's dialogue loop",
+    ),
     magnitude: bool = typer.Option(False, "--magnitude", help="Run Magnitude blueprint"),
     sot: bool = typer.Option(False, "--sot", help="Run Skeleton-of-Thought"),
     skip_clarify: bool = typer.Option(
@@ -214,7 +219,8 @@ def enhance(
             provider=provider, model=chosen_model,
             opts=PipelineOptions(
                 scorer_model=scorer_model or None,
-                magnitude_mode=magnitude, persona_mode=persona, sot_mode=sot,
+                magnitude_mode=magnitude, persona_mode=persona,
+                complement_persona=complement_persona, sot_mode=sot,
                 temperature=temperature, max_tokens_scale=max_tokens_scale,
             ),
             on_event=_on_event,
@@ -256,6 +262,7 @@ def enhance(
                     scorer_model=snapshot.get("scorer_model"),
                     magnitude_mode=snapshot.get("magnitude_mode", False),
                     persona_mode=snapshot.get("persona_mode", False),
+                    complement_persona=snapshot.get("complement_persona", False),
                     sot_mode=snapshot.get("sot_mode", False),
                     session_id=snapshot.get("session_id"),
                     temperature=temperature,

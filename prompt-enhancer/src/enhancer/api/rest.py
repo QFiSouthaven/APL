@@ -44,6 +44,7 @@ class EnhanceRequest(BaseModel):
     temperature: float = Field(0.7, ge=0.0, le=2.0)
     max_tokens_scale: float = Field(1.0, ge=0.3, le=3.0)
     persona_mode: bool = False
+    complement_persona: bool = False
     magnitude_mode: bool = False
     sot_mode: bool = False
     skip_clarify: bool = True  # sibling products default to non-interactive
@@ -67,6 +68,7 @@ class EnhancedEnvelope(BaseModel):
     task_type: str = ""
     technique: str = ""
     persona: str | None = None
+    persona_partner: str | None = None
     scores: dict[str, int] = Field(default_factory=dict)
     scores_fallback: bool = False
     pass3_partial: bool = False
@@ -268,6 +270,7 @@ async def enhance(req: EnhanceRequest) -> EnhancedEnvelope:
         scorer_model=req.scorer_model,
         magnitude_mode=req.magnitude_mode,
         persona_mode=req.persona_mode,
+        complement_persona=req.complement_persona,
         sot_mode=req.sot_mode,
         temperature=req.temperature,
         max_tokens_scale=req.max_tokens_scale,
@@ -300,6 +303,7 @@ async def enhance(req: EnhanceRequest) -> EnhancedEnvelope:
                 opts=PipelineOptions(
                     scorer_model=snapshot.get("scorer_model"),
                     persona_mode=snapshot.get("persona_mode", False),
+                    complement_persona=snapshot.get("complement_persona", False),
                     magnitude_mode=snapshot.get("magnitude_mode", False),
                     sot_mode=snapshot.get("sot_mode", False),
                     session_id=snapshot.get("session_id"),
@@ -323,6 +327,7 @@ async def enhance(req: EnhanceRequest) -> EnhancedEnvelope:
         task_type=result.task_type or "",
         technique=result.technique or "",
         persona=result.persona,
+        persona_partner=result.persona_partner,
         scores=result.scores or {},
         scores_fallback=result.scores_fallback,
         pass3_partial=result.pass3_partial,

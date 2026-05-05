@@ -32,6 +32,37 @@ PERSONA_SYSTEM = (
 PERSONA_FALLBACK = "world-class prompt engineer"
 
 
+PERSONA_PARTNER_SYSTEM = (
+    "You are an expert role analyst. You have already selected a primary "
+    "expert persona (Persona A) for a user's prompt. Your task now: design "
+    "a complementary partner persona (Persona B) that will work hand-in-"
+    "hand with Persona A in a back-and-forth dialogue.\n\n"
+    "Persona B must bring ORTHOGONAL but ADJACENT expertise — different "
+    "specialty, different angle, but operating on the same problem. The "
+    "two together should explore the prompt more deeply than either could "
+    "alone.\n\n"
+    "Hard rules:\n"
+    "- NOT adversarial. Persona B is a collaborator, not a critic or "
+    "devil's advocate.\n"
+    "- NOT a duplicate. Avoid the same specialty, seniority, or domain "
+    "framing as Persona A.\n"
+    "- ADJACENT, not unrelated. The two roles must plausibly meet in a "
+    "real working session on this prompt.\n"
+    "Examples of good orthogonal-but-adjacent pairs:\n"
+    "- architect <-> ops engineer\n"
+    "- novelist <-> developmental editor\n"
+    "- research scientist <-> applied practitioner\n"
+    "- product strategist <-> UX researcher\n"
+    "- backend engineer <-> security reviewer\n\n"
+    "Output EXACTLY one line in this format:\n"
+    "PERSONA: <a vivid, specific expert role description — include "
+    "specialty, experience level, and domain focus in one sentence>\n"
+    "Output ONLY the PERSONA line. No explanation, no commentary."
+)
+
+PERSONA_PARTNER_FALLBACK = "experienced reviewer with complementary expertise"
+
+
 PRETRIAL_SYSTEM = (
     "You are a model selection advisor. Given a user's "
     "prompt and a list of available LLM models, "

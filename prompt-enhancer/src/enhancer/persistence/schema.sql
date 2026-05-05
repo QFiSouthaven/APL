@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS runs (
     task_type           TEXT,
     technique           TEXT,
     persona             TEXT,
+    persona_partner     TEXT,                                   -- complementary persona (round-robin Bravo)
     pass1_output        TEXT,
     pass2_output        TEXT,
     pass4_output        TEXT,
