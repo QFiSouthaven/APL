@@ -21,7 +21,7 @@ Double-click `Start.bat` — it creates the venv, installs `pip install -e ".[de
 ```
 .venv\Scripts\activate
 python app.py              # launches the desktop window
-pytest -v                  # full test suite (53 tests as of 2026-04-26)
+pytest -v                  # full test suite (162 tests as of 2026-05-04, v0.1.0)
 pytest tests/test_intel.py # one file
 ```
 

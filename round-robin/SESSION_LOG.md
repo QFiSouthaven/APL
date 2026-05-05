@@ -183,10 +183,55 @@ Five concrete additions, all polish/quality-of-life that the original plan didn'
 
 ---
 
-## Tally (final)
+## Tally (Phase 8 snapshot)
 
 - **Source/test/docs files:** 26 (~3,500 LoC)
-- **Tests:** 70 passing (storage 4 · lm_client 6 · charlie_workspace 10 · orchestrator 15 · monitoring 7 · intel 15 · user_config 7 · server_routes 10) — wait, that's 74; let me fix: storage 4 · lm_client 6 · charlie_workspace 10 · orchestrator 11 · monitoring 7 · intel 15 · user_config 7 · server_routes 10 = 70
-- **Persistence categories:** 6 (state, **config (new)**, presets, sessions, errors.log, charlie_workspace)
+- **Tests:** 70 passing (storage 4 · lm_client 6 · charlie_workspace 10 · orchestrator 11 · monitoring 7 · intel 15 · user_config 7 · server_routes 10)
+- **Persistence categories:** 6 (state, config, presets, sessions, errors.log, charlie_workspace)
 - **WS events:** 13 typed + `hello` + `pong`
-- **REST routes:** 24 (model, health, run, **config (new)**, presets, sessions, errors, charlie/file, state)
+- **REST routes:** 24 (model, health, run, config, presets, sessions, errors, charlie/file, state)
+
+---
+
+## Phase 9 — APL umbrella + `/api/review` + ReasoningPanel (v1.2 → v2.2 era)
+
+After Phase 8, round-robin moved under the `APL/` umbrella alongside
+prompt-enhancer and development. Subsequent work:
+
+- **Discovery + cross-component endpoints (v1.2)** — `discovery.py`
+  mirroring prompt-enhancer's, plus `/api/peers` and `/api/health`.
+  `_free_port()` now defers to discovery (8766 default).
+- **`/api/review` four-voice review (v2.1)** — `code_review.py` with
+  Agent A (pragmatic engineer) → Agent B (rigorous critic) → Agent C
+  (synthesist / Charlie) → Consensus synthesis. Each pass sees prior
+  verdicts. Response shape: `{approved, request_regenerate, issues,
+  summary, agents: {agent_a_verdict, agent_b_verdict, agent_c_verdict,
+  consensus}}`.
+- **ReasoningPanel re-export (v2.2)** — `round_robin/reasoning_panel.py`
+  path-injects prompt-enhancer's `src/` and re-exports `LLMSlot`,
+  `ReasoningPanel`, `PanelResult`, `SlotResponse`. Single source of
+  truth lives in prompt-enhancer; eventual extraction target is
+  `APL/lab/apl-llm/`.
+- **Panel-per-voice review (v2.2; commits `a79a0ca`, `2b12718`)** —
+  `review_with_dialogue` accepts `reasoning_panel=...`. When supplied,
+  EACH of the four voices (A / B / C / Consensus) consults the panel
+  instead of the single `lm_client`, so every voice itself becomes a
+  panel of N reasoning slots. Same response shape as the non-panel path
+  so callers don't have to branch.
+- **Charlie voice in `/api/review`** — Agent C is now Charlie acting as
+  the synthesist, mirroring the orchestrator's existing Charlie role.
+
+User-facing reference for the panel: see
+[`prompt-enhancer/docs/REASONING_PANEL.md`](../prompt-enhancer/docs/REASONING_PANEL.md)
+— sections 7 and 9 cover round-robin specifically (panel-per-voice
+wiring + telemetry shape).
+
+### Tally (current — re-collected 2026-05-04, v0.1.0)
+
+- **Tests:** **162 passing** across the round-robin suite (collected via
+  `pytest -q --collect-only`). Up from Phase 8's 70: discovery,
+  endpoints, code-review, panel-per-voice, multi-host, plus growth
+  inside the existing files.
+- **Umbrella total:** 724 across the three siblings (prompt-enhancer
+  338 + development 224 + round-robin 162). See
+  `prompt-enhancer/STATUS.md` for the canonical phase table.

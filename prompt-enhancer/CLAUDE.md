@@ -41,12 +41,12 @@ src/enhancer/
                 + resilience (@with_retry, @with_stream_retry, ProviderHealth circuit breaker)
                 + model_router (task-aware scorer selection via substring rules — v1.2)
                 + registry (`enhancer.providers` + `enhancer.transforms` entry-point groups — v1.2 + v2.0)
-                + reasoning_panel (N-slot heterogeneous LLM panel; modes: primary-only/parallel/sequential; aggregators: primary-wins/longest/consensus-vote — v2.1)
+                + reasoning_panel (N-slot heterogeneous LLM panel; modes: primary-only/parallel/sequential; aggregators: primary-wins/longest/consensus-vote — v2.1; see `docs/REASONING_PANEL.md`)
   observability/  configure_logging() + structlog + soft OTEL hook (env-gated on OTEL_EXPORTER_OTLP_ENDPOINT) — v1.1
   api/          rest (incl. /api/runs, /api/sessions, /api/forward-to/{peer} — v1.2) + discovery (services.toml lookup)
   mcp/          MCPClient + MCPRegistry + MCPToolInvoker (HTTP transport, JSON-RPC 2.0, retry-wrapped — v2.0)
   core/pipeline_graph.py  TOML pipeline-graph loader + static invariant validator — v2.0
-  core/pipeline.py        wired in v2.0.1: optional `pipeline_graph` validates at call time; `mcp_invoker` + `mcp_pre_pass1` / `mcp_pre_pass3` enrich Pass 1/3 user messages; `model_router` auto-picks Pass 4 scorer when `opts.scorer_model` is empty. v2.2: optional `reasoning_panel` routes Pass 1/2/4 through `panel.consult` (Pass 3 streaming deferred); telemetry lands in `extras["panel"]`.
+  core/pipeline.py        wired in v2.0.1: optional `pipeline_graph` validates at call time; `mcp_invoker` + `mcp_pre_pass1` / `mcp_pre_pass3` enrich Pass 1/3 user messages; `model_router` auto-picks Pass 4 scorer when `opts.scorer_model` is empty. v2.2: optional `reasoning_panel` routes Pass 1/2/4 through `panel.consult`; Pass 3 streams primary live + runs partners non-streaming for telemetry (commit `7f58aad`); telemetry lands in `extras["panel"]` (see `docs/REASONING_PANEL.md`).
   persistence/  SQLite (schema.sql, db, runs, sessions) + JSONL dual-writer + safestorage
   api/          REST + inter-product discovery (services.toml)
   cli/          typer entrypoint (main, enhance pre-flights ensure_model_loaded) + extras (batch / compare / export)

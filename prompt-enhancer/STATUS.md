@@ -14,7 +14,7 @@ Enhancement Agent on every diff._
 | 4 — typer CLI | ✅ done | `version` `models` `enhance` `history` `ui` `batch` `compare` `export` + interactive disambiguation Q&A + `--skip-clarify` flag |
 | 5 — NiceGUI Desktop Studio | ✅ done | Studio (status strip + tabs + sliders + diff view + 6 components), History (with branch_tree row-detail), Analytics, Compare, Templates (8 seeds), Settings, disambiguation modal |
 | 6 — packaging | ✅ done | `dist/prompt-enhancer/prompt-enhancer.exe` rebuilt 2026-05-03 against Python 3.12 (117 MB, smoke=HTTP 200). Inno installer compiled to `release/prompt-enhancer-setup.exe` (38 MB, SHA256 `96a6ff106bc235f5ec3d678d1f00f1db834e510cfd54a0b86460db44e7d86198`) using Inno Setup 6.7.1. Includes the `tomli-w` runtime-dep fix from commit `20112ff`. |
-| 7 — verification | ✅ **LIVE-TESTED** | **284/284 prompt-enhancer + 129/129 round-robin + 202/202 development tests green** (umbrella total: 615 fast tests, +1 LM-Studio integration test deselected by default; re-run 2026-05-04 after development v2.0.0 capstone landed — MCP tools, stack templates, round-robin reviewer alternate) |
+| 7 — verification | ✅ **LIVE-TESTED** | **338 prompt-enhancer + 162 round-robin + 224 development tests collected** (umbrella total: 724 fast tests, +1 LM-Studio integration test deselected by default; re-collected 2026-05-04 after v2.2 ReasoningPanel work — Pass 1/2/3/4 wiring in prompt-enhancer, all 5 stages in development, Charlie + panel-per-voice in round-robin) |
 | 8 — LM Studio discovery + auto-load | ✅ done | `src/enhancer/llm/lms_discovery.py` + 10 tests. Calls `/api/v0/models` for state-aware listing, falls back to `lms load` CLI shell-out when nothing is loaded, raises `ModelLoadUnavailableError` with operator instructions on failure. Wired into CLI `enhance`, NiceGUI startup, and the methodology-agent Stop hook. |
 | 9 — provider-layer resilience | ✅ done | `src/enhancer/llm/resilience.py` + 16 tests. `@with_retry` + `@with_stream_retry` decorators (exp-backoff, ±25 % jitter, 3 retries, honors `Retry-After` on 429); `ProviderHealth` circuit-breaker opens after 3 consecutive final failures, 30 s cooldown. Session counters surfaced to the Studio session drawer. Pipeline invariants in `core/pipeline.py` are NOT touched — wrap is at the provider layer. |
 | 10 — multi-backend providers (v1.1) | ✅ done | `src/enhancer/llm/{ollama,openai,anthropic}.py` real implementations replacing v1.0 NotImplementedError stubs. All three retry-wrapped. OpenAI uses `httpx` direct (skips SDK weight); Anthropic targets native `/v1/messages` shape with system-role lifting and typed-SSE parsing, also reaches LM Studio's compat endpoint via `ENHANCER_ANTHROPIC_BASE_URL`. 23 conformance tests in `tests/test_providers.py`. |
@@ -28,51 +28,35 @@ Enhancement Agent on every diff._
 | 18 — `enhancer.transforms` entry-point group (v2.0) | ✅ done | Second entry-point group alongside `enhancer.providers`. `discover_transforms()` returns plugin classes registered under `enhancer.transforms`. Duck-checked (callable OR has `.apply()`); failures logged + skipped. Built-in transforms (Persona, Magnitude, SoT) remain inline; this surface is for THIRD-PARTY plugins. 6 new tests. |
 | 19 — UI test harness + smoke coverage (v2.0) | ✅ done | Closed the historic UI testing gap. 53 tests across `test_ui_pages.py` (6 page modules) + `test_ui_components.py` (6 component modules). `ui_tmp_db` fixture in `conftest.py` redirects DB path to `tmp_path` so render() smoke tests don't touch real user data. Decision record at `docs/UI_TESTING.md`: import-only smoke for v2.0; `nicegui.testing` interaction harness deferred to v2.1. |
 | 20 — pipeline wirings (v2.0.1) | ✅ done | Three optional `run_pipeline` parameters that preserve all pre-2.0.1 behavior when `None`: `pipeline_graph` (validated at call-time via `core.pipeline_graph.validate`; rejects invariant-violating configs BEFORE any LLM call); `mcp_invoker` + `mcp_pre_pass1` / `mcp_pre_pass3` (calls MCP tools and stitches results into the user message via `[MCP CONTEXT]…[END MCP CONTEXT]` block — failures swallowed so a misbehaving MCP server can't break a pipeline run); `model_router` auto-selection for Pass 4 scorer (when `opts.scorer_model` is empty, picks task-aware scorer from `provider.list_models()`; falls back to `model` on failure). 9 new tests in `test_pipeline_v201.py`. **All three frozen concurrency invariants survived intact** — `tests/test_concurrency.py` passes unchanged. |
+| 21 — ReasoningPanel abstraction (v2.1) | ✅ done | New `src/enhancer/llm/reasoning_panel.py`: `LLMSlot`, `ReasoningPanel`, `PanelResult`, `SlotResponse`. Three modes (`primary-only` / `parallel` / `sequential`), three aggregators (`primary-wins` / `longest` / `consensus-vote`). Heterogeneous panels (different providers/models/hosts per slot) are first-class; partner failures are captured per-slot and never propagate. 24 tests in `test_reasoning_panel.py`. Re-exported by round-robin (`round_robin/reasoning_panel.py`) and consumed by development (`development.stages.base._chat_or_panel`). |
+| 22 — ReasoningPanel pipeline wirings (v2.2) | ✅ done | `run_pipeline` gains optional `reasoning_panel`, `panel_mode`, `panel_aggregator` kwargs. Pass 1 / Pass 2 / Pass 4 route through `panel.consult` when supplied (commit `50dfb5e`). Pass 3 streams the primary's tokens live + runs partners non-streaming in parallel for telemetry — `primary-wins` by design (commit `7f58aad`). All telemetry lands in `result.extras["panel"][<pass_key>]` with the canonical `{primary, partners: [{name, content, ms, error}]}` shape. Sibling components ship matching wirings: development v2.2 (Architect/Coder/Reviewer/Tester/Packager — all 5 stages); round-robin (Charlie voice + panel-per-voice in `/api/review`). User-facing reference: **`docs/REASONING_PANEL.md`**. Partner timeouts on Pass 3 are bounded by `request_timeout`. Round-robin handoff helper + multi-host CLI/UI wiring shipped alongside (commits `fb49b86`, `66064c7`, `f0389be`). All three concurrency invariants still pass — `tests/test_concurrency.py` unchanged. |
 
-## Test status (re-run 2026-05-04, Python 3.12 dev venv, v2.0.1)
+## Test status (re-collected 2026-05-04, Python 3.12 dev venv, v2.2)
 
-prompt-enhancer suite (`prompt-enhancer/tests/`):
+prompt-enhancer suite (`prompt-enhancer/tests/`) — **338 tests** across
+28 test files (1 deselected by default: `test_integration_panel_lmstudio.py`,
+which talks to a real LM Studio):
 
 ```
-tests/test_api_rest.py ................        16 passed   (REST endpoints + cross-invocation — v1.2)
-tests/test_branching.py ...                    3 passed   (branch-from-pass)
-tests/test_cli_auto_resume.py ..               2 passed   (CLI resume after disambig)
-tests/test_concurrency.py ...                  3 passed   (the three load-bearing guards)
-tests/test_config_toml.py ...                  3 passed   (TOML settings)
-tests/test_disambiguation.py ....              4 passed   (pause + resume + per-pass timing + skip-clarify)
-tests/test_discovery.py .....                  5 passed   (inter-product service discovery)
-tests/test_events.py .....                     5 passed   (EventType v2 — 36 members, all v1 names preserved)
-tests/test_lms_discovery.py ..................  18 passed   (LM Studio discovery + multi-host)
-tests/test_mcp.py .......................     23 passed   (MCP client + registry + invoker — v2.0)
-tests/test_migration.py ....                   4 passed   (JSONL → SQLite)
-tests/test_model_router.py ............................  28 passed  (task-aware scorer routing)
-tests/test_parsing.py ...........................  27 passed
-tests/test_pipeline_graph.py ..............................  27 passed   (TOML loader + 6 invariant guards — v2.0)
-tests/test_pipeline_smoke.py ...               3 passed   (end-to-end via FakeChatProvider)
-tests/test_pipeline_v201.py .........          9 passed   (graph + MCP hooks + model_router wirings — v2.0.1)
-tests/test_providers.py .......................  23 passed   (cross-provider conformance — v1.1)
-tests/test_registry.py ..............          14 passed   (provider + transform entry-points — v2.0)
-tests/test_resilience.py ................     16 passed   (retry + circuit breaker + stream wrap)
-tests/test_ui_components.py ............................  28 passed   (UI component smoke — v2.0)
-tests/test_ui_pages.py .........................  25 passed   (UI page smoke — v2.0)
+test_api_rest, test_branching, test_cli_auto_resume, test_concurrency,
+test_config_toml, test_disambiguation, test_discovery, test_events,
+test_integration_panel_lmstudio (deselected), test_lms_discovery,
+test_lms_host_picker_wiring, test_mcp, test_migration, test_model_router,
+test_parsing, test_pipeline_graph, test_pipeline_panel, test_pipeline_smoke,
+test_pipeline_v201, test_providers, test_reasoning_panel, test_registry,
+test_resilience, test_round_robin_handoff, test_ui_components, test_ui_pages
                                               ────────────
-                                              284 passed in 13.21s
+                                              338 collected
 ```
 
-round-robin suite (`round-robin/tests/`):
+development sibling (`development/tests/`): **224 tests** (panel wiring
+across all 5 stages — v2.2.0 release commit `b85f05c`).
 
-```
-tests/test_charlie_summary.py + test_charlie_workspace.py + test_health.py
-+ test_intel.py + test_lm_client.py + test_lms_cli.py + test_monitoring.py
-+ test_orchestrator.py + test_server_routes.py + test_storage.py
-+ test_user_config.py                          117 passed   (pre-existing)
-tests/test_discovery.py .........               9 passed   (umbrella discovery — v1.2)
-tests/test_endpoints.py ...                     3 passed   (/api/peers + /api/health — v1.2)
-                                              ────────────
-                                              129 passed in 5.34s
-```
+round-robin sibling (`round-robin/tests/`): **162 tests** (Charlie voice
++ panel-per-voice in `/api/review` — commit `2b12718`).
 
-**Umbrella total: 290 tests across two components.**
+**Umbrella total: 724 tests across three components.** When in doubt,
+collect fresh: each component has its own `.venv/` and `pytest -q --collect-only`.
 
 **Build-env note:** dev venv was rebuilt fresh on 2026-05-02 against Python 3.12.0 (commit `3a6fa8e`). The previous venv ran on Python 3.13 — the bundled exe in `packaging/dist/` still carries 3.13 `.pyd` files and may need a rebuild before shipping.
 
