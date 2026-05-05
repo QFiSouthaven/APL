@@ -64,7 +64,7 @@ from .transforms import (
 if TYPE_CHECKING:
     from .pipeline_graph import PipelineGraph
     from ..mcp.invoker import MCPToolInvoker
-    from ..llm.reasoning_panel import ReasoningPanel
+    from ..llm.reasoning_panel import ReasoningPanel, LLMSlot
 
 logger = logging.getLogger("enhancer.core.pipeline")
 
@@ -601,13 +601,34 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
 
         pass3_user = "\n".join(pass3_user_parts)
 
+        # v2.2: optional Pass 3 streaming panel — primary's tokens still
+        # stream to the user; partners run non-streaming ``chat`` calls
+        # concurrently for telemetry only. Streaming aggregation across
+        # heterogeneous providers has no UX-coherent answer, so this is
+        # primary-wins by design.
+        pass3_messages = [
+            {"role": "system", "content": pass3_system},
+            {"role": "user", "content": pass3_user},
+        ]
+        pass3_partners_task: asyncio.Task | None = None
+        if (
+            reasoning_panel is not None
+            and panel_mode != "primary-only"
+            and len(reasoning_panel.partners) > 0
+        ):
+            pass3_partners_task = asyncio.create_task(
+                _run_pass3_partners(
+                    reasoning_panel, pass3_messages,
+                    model=model, temperature=temperature,
+                    max_tokens=scaled(budgets.rewrite, max_tokens_scale),
+                    timeout=request_timeout,
+                )
+            )
+
         enhanced_chunks: list[str] = []
         try:
             async for tok in provider.chat_stream(
-                messages=[
-                    {"role": "system", "content": pass3_system},
-                    {"role": "user", "content": pass3_user},
-                ],
+                messages=pass3_messages,
                 model=model, temperature=temperature,
                 max_tokens=scaled(budgets.rewrite, max_tokens_scale),
                 timeout=request_timeout, idle_timeout=idle_timeout,
@@ -626,6 +647,25 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
                         step="pass3", error=str(exc))
 
         enhanced = "".join(enhanced_chunks)
+
+        # v2.2: harvest partner telemetry. Bounded by request_timeout so
+        # an unreachable partner host can't pin Pass 4 indefinitely.
+        if pass3_partners_task is not None:
+            try:
+                partner_results = await asyncio.wait_for(
+                    pass3_partners_task, timeout=request_timeout,
+                )
+            except asyncio.TimeoutError:
+                pass3_partners_task.cancel()
+                partner_results = [{
+                    "name": p.name, "content": "", "ms": 0,
+                    "error": "TimeoutError",
+                } for p in reasoning_panel.partners]
+            panel_telemetry["pass3"] = {
+                "primary": enhanced,
+                "partners": partner_results,
+            }
+
         t3 = time.monotonic()
         await _emit(on_event, EventType.AGENT_PASS_RESULT,
                     pass_number=3, pass_name=PASS_NAMES[3],
@@ -869,6 +909,61 @@ async def run_pipeline(  # noqa: C901, PLR0912, PLR0915 — port of monolith _ru
 
 
 # ── helpers ─────────────────────────────────────────────────────────
+
+async def _run_pass3_partners(
+    panel: "ReasoningPanel",
+    messages: list[dict[str, Any]],
+    *,
+    model: str,
+    temperature: float | None,
+    max_tokens: int | None,
+    timeout: float,
+) -> list[dict[str, Any]]:
+    """Run partner-slot ``chat`` calls concurrently for Pass 3 telemetry.
+
+    Pass 3 is the streaming pass — its primary's tokens are already
+    flowing to the user via ``provider.chat_stream``. To keep that UX
+    intact while still getting heterogeneous-panel telemetry, partners
+    run a non-streaming ``chat`` against the SAME messages here. Their
+    full content surfaces only in ``extras["panel"]["pass3"]``; the
+    user-visible stream remains the primary's verbatim. This is
+    "primary-wins" by design — streaming aggregation across providers
+    has no UX-coherent answer, so we don't try.
+
+    Each partner failure is captured per-slot; never raises. Callers
+    must still wrap the awaited task with ``asyncio.wait_for`` to
+    bound wall-clock when partners are unreachable.
+    """
+    async def _one(slot: "LLMSlot") -> dict[str, Any]:
+        slot_messages = list(messages)
+        decoration = slot.system_decoration()
+        if decoration:
+            slot_messages = [{"role": "system", "content": decoration}] + slot_messages
+        t0 = time.monotonic()
+        try:
+            content = await slot.provider.chat(
+                slot_messages,
+                model=slot.model or model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+            return {
+                "name": slot.name,
+                "content": content or "",
+                "ms": int((time.monotonic() - t0) * 1000),
+                "error": None,
+            }
+        except Exception as exc:  # noqa: BLE001 — partner failures are tolerated
+            return {
+                "name": slot.name,
+                "content": "",
+                "ms": int((time.monotonic() - t0) * 1000),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    return await asyncio.gather(*(_one(p) for p in panel.partners))
+
 
 async def _call_panel(
     panel: "ReasoningPanel",
