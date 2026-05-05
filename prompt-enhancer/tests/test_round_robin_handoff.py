@@ -79,7 +79,7 @@ async def test_round_robin_handoff_handles_missing_peer(monkeypatch) -> None:
 
     result = await post_review(
         original_prompt="hi", enhanced="hello world",
-        peer_name="round-robin",
+        peer_name="round_robin",
     )
 
     assert isinstance(result, HandoffResult)

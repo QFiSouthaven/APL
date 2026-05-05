@@ -71,7 +71,7 @@ async def post_review(
     *,
     original_prompt: str,
     enhanced: str,
-    peer_name: str = "round-robin",
+    peer_name: str = "round_robin",
     timeout: float = 30.0,
 ) -> HandoffResult:
     """POST the run's artifacts to the round-robin sibling's review endpoint.
