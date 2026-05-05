@@ -44,7 +44,7 @@ from ..tools import (
     dispatch_tool_call,
 )
 from ..types import STAGE_PROGRESS, LayerGenerationError
-from .base import Stage
+from .base import Stage, _chat_or_panel
 
 logger = logging.getLogger("development.stages.coder")
 
@@ -123,6 +123,24 @@ class CoderStage(Stage):
         )
         board = ctx.get("message_board")
 
+        # Panel mode/aggregator come from the BuildRequest. v2.2: in
+        # tool-use mode, the FIRST round per layer (the planning call,
+        # before any tool loop iterations) routes through the panel
+        # when one is wired. Subsequent tool-loop iterations stick to
+        # the single-provider ``chat_with_tools`` path because the panel
+        # has no native multi-provider tool-call protocol — partner
+        # slots can't coherently emit tool_calls into a shared sandbox.
+        # The aggregated planning text is appended as an assistant turn
+        # so the tool loop sees the panel's reasoning before its first
+        # tool decision. Per-stage telemetry (last layer's call) lands
+        # in ``ctx["coder_panel"]``.
+        request = ctx.get("build_request")
+        panel_mode = getattr(request, "panel_mode", None) or "parallel"
+        panel_aggregator = (
+            getattr(request, "panel_aggregator", None) or "primary-wins"
+        )
+        last_panel_telemetry: dict[str, Any] | None = None
+
         for layer in layers:
             if not isinstance(layer, dict):
                 # Defensive: malformed plan entry. Skip it loudly.
@@ -150,9 +168,12 @@ class CoderStage(Stage):
 
             tool_calls_used = 0
             if self._tool_use:
-                files, tool_calls_used = await self._generate_with_tools(
-                    plan, layer, layer_name
+                files, tool_calls_used, telemetry = await self._generate_with_tools(
+                    plan, layer, layer_name,
+                    mode=panel_mode, aggregator=panel_aggregator,
                 )
+                if telemetry is not None:
+                    last_panel_telemetry = telemetry
             else:
                 files = await generator(plan, layer, self._llm)
 
@@ -172,6 +193,8 @@ class CoderStage(Stage):
 
         ctx["artifacts"] = artifacts
         ctx["artifacts_by_layer"] = artifacts_by_layer
+        if last_panel_telemetry is not None:
+            ctx["coder_panel"] = last_panel_telemetry
         return ctx
 
     # ── tool-use path (v2.0) ────────────────────────────────────────
@@ -181,12 +204,29 @@ class CoderStage(Stage):
         plan: dict[str, Any],
         layer: dict[str, Any],
         layer_name: str,
-    ) -> tuple[dict[str, str], int]:
-        """Drive the tool-loop for one layer. Returns (files, tool_calls_used).
+        *,
+        mode: str = "parallel",
+        aggregator: str = "primary-wins",
+    ) -> tuple[dict[str, str], int, dict[str, Any] | None]:
+        """Drive the tool-loop for one layer.
+
+        Returns ``(files, tool_calls_used, panel_telemetry)``.
+        ``panel_telemetry`` is ``None`` when no panel is wired
+        (preserving v2.0 ctx shape).
 
         Per layer we materialize a fresh :class:`tempfile.TemporaryDirectory`
         as the sandbox root; every fs/git/exec call is scoped to it. The
         directory is torn down on exit even if the LLM errors mid-loop.
+
+        v2.2 panel wiring: when ``self._reasoning_panel`` is supplied,
+        the FIRST round (the planning consultation) routes through
+        :meth:`ReasoningPanel.consult`. The aggregated text becomes a
+        synthetic assistant turn appended to the conversation so the
+        ensuing tool-loop sees the panel's reasoning. The tool loop
+        itself uses the single-provider ``chat_with_tools`` path
+        unchanged — partner slots can't coherently emit tool_calls
+        into the shared sandbox, so panel involvement deliberately
+        ends after planning.
 
         Raises :class:`LayerGenerationError` if the LLM never produces a
         parseable final JSON object after the budget is exhausted.
@@ -196,6 +236,32 @@ class CoderStage(Stage):
             {"role": "system", "content": _TOOL_USE_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
+
+        # v2.2: optional panel-driven planning round. We do a textual
+        # consult (no tools) and graft the aggregated content into the
+        # conversation as an assistant turn — the subsequent tool-loop
+        # rounds run unchanged against the bare provider.
+        panel_telemetry: dict[str, Any] | None = None
+        if self._reasoning_panel is not None:
+            planning_messages = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Before any tool calls, briefly outline your "
+                        "approach for generating this layer's files. "
+                        "Plain text only — no JSON, no tool calls."
+                    ),
+                },
+            ]
+            planning_text, panel_telemetry = await _chat_or_panel(
+                self._llm, self._reasoning_panel,
+                planning_messages,
+                temperature=0.2, max_tokens=1024,
+                mode=mode, aggregator=aggregator,
+            )
+            if planning_text:
+                messages.append({"role": "assistant", "content": planning_text})
 
         budget = self._tool_call_budget
         tool_calls_used = 0
@@ -276,4 +342,4 @@ class CoderStage(Stage):
             else:
                 result_files[path] = json.dumps(body, indent=2)
 
-        return result_files, tool_calls_used
+        return result_files, tool_calls_used, panel_telemetry

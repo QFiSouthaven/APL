@@ -20,7 +20,7 @@ from typing import Any, ClassVar
 from .._json_utils import parse_llm_json
 from ..templates import discover_templates
 from ..types import STAGE_PROGRESS, ArchitectFailedError, BuildRequest
-from .base import Stage
+from .base import Stage, _chat_or_panel
 
 logger = logging.getLogger("development.stages.architect")
 
@@ -91,12 +91,28 @@ class ArchitectStage(Stage):
         # Fall through to the existing LLM-driven path.
         user_prompt = _build_user_prompt(request)
 
+        # Panel mode/aggregator come from the BuildRequest when a
+        # ``reasoning_panel`` was wired into this stage. v2.2: Architect
+        # routes its single planning call through the panel when one
+        # exists; the aggregated text is parsed exactly as the bare
+        # provider response would be, and per-slot raw outputs are
+        # surfaced in ``ctx["architect_panel"]`` for observability.
+        panel_mode = getattr(request, "panel_mode", None) or "parallel"
+        panel_aggregator = (
+            getattr(request, "panel_aggregator", None) or "primary-wins"
+        )
+
         # First attempt.
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        raw = await self._llm.chat(messages, temperature=0.2, max_tokens=2048)
+        panel_telemetry: dict[str, Any] | None = None
+        raw, panel_telemetry = await _chat_or_panel(
+            self._llm, self._reasoning_panel,
+            messages, temperature=0.2, max_tokens=2048,
+            mode=panel_mode, aggregator=panel_aggregator,
+        )
         plan = parse_llm_json(raw)
 
         # One retry on parse failure, with a tighter reminder.
@@ -112,7 +128,11 @@ class ArchitectStage(Stage):
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": RETRY_REMINDER},
             ]
-            raw = await self._llm.chat(messages, temperature=0.0, max_tokens=2048)
+            raw, panel_telemetry = await _chat_or_panel(
+                self._llm, self._reasoning_panel,
+                messages, temperature=0.0, max_tokens=2048,
+                mode=panel_mode, aggregator=panel_aggregator,
+            )
             plan = parse_llm_json(raw)
 
         if plan is None:
@@ -125,6 +145,8 @@ class ArchitectStage(Stage):
         # rather than raising so simple goals don't have to populate every field.
         plan = _normalize_plan(plan)
         ctx["plan"] = plan
+        if panel_telemetry is not None:
+            ctx["architect_panel"] = panel_telemetry
         return ctx
 
 

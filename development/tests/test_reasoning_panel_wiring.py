@@ -391,8 +391,7 @@ async def test_one_slot_crashes_reviewer_still_produces_verdict(monkeypatch):
 @pytest.mark.asyncio
 async def test_orchestrator_threads_panel_into_reviewer(fake_lm, tmp_board):
     """Constructing the Orchestrator with reasoning_panel=... must wire
-    that panel into the default-pipeline ReviewerStage (and only that
-    stage in v2.1)."""
+    that panel into every default-pipeline stage (v2.2: full wiring)."""
     primary = _slot("primary", responses=[_verdict_json(True, [], False)])
     panel = ReasoningPanel([primary])
 
@@ -403,15 +402,9 @@ async def test_orchestrator_threads_panel_into_reviewer(fake_lm, tmp_board):
     assert [s.name for s in stages] == [
         "architect", "coder", "reviewer", "tester", "packager",
     ]
-    # Reviewer got the panel.
-    reviewer_stage = next(s for s in stages if s.name == "reviewer")
-    assert reviewer_stage._reasoning_panel is panel
-    # Other stages did NOT get the panel in v2.1 (they accept the kwarg
-    # but the orchestrator only wires the Reviewer for now).
+    # v2.2: every default stage receives the panel.
     for s in stages:
-        if s.name == "reviewer":
-            continue
-        assert s._reasoning_panel is None
+        assert s._reasoning_panel is panel
 
 
 def test_orchestrator_default_panel_is_none(fake_lm, tmp_board):

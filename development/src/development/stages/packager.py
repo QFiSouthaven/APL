@@ -48,7 +48,7 @@ from ._packager_validator import (
     validate_env_example,
     validate_shell_script,
 )
-from .base import Stage
+from .base import Stage, _chat_or_panel
 
 logger = logging.getLogger("development.stages.packager")
 
@@ -152,9 +152,21 @@ class PackagerStage(Stage):
         artifacts_flat: dict[str, str] = ctx.setdefault("artifacts", {})
         board: MessageBoard | None = ctx.get("message_board")
 
+        # Panel mode/aggregator come from BuildRequest. v2.2: route the
+        # single packaging LLM call through the panel when wired and
+        # surface the per-slot raw outputs in ``ctx["packager_panel"]``.
+        request = ctx.get("build_request")
+        panel_mode = getattr(request, "panel_mode", None) or "parallel"
+        panel_aggregator = (
+            getattr(request, "panel_aggregator", None) or "primary-wins"
+        )
+
         # 1. Drive the LLM with a stack-aware prompt; tolerate one retry.
         try:
-            files = await self._generate_packaging_files(plan, artifacts_by_layer)
+            files, panel_telemetry = await self._generate_packaging_files(
+                plan, artifacts_by_layer,
+                mode=panel_mode, aggregator=panel_aggregator,
+            )
         except LayerGenerationError as exc:
             logger.warning(
                 "Packager: LLM produced unparseable JSON after retry; "
@@ -197,6 +209,8 @@ class PackagerStage(Stage):
             ok_count=ok_count,
             fail_count=fail_count,
         )
+        if panel_telemetry is not None:
+            ctx["packager_panel"] = panel_telemetry
         return ctx
 
     # ── internal helpers ────────────────────────────────────────────
@@ -205,10 +219,14 @@ class PackagerStage(Stage):
         self,
         plan: dict[str, Any],
         artifacts_by_layer: dict[str, dict[str, str]],
-    ) -> dict[str, str]:
+        *,
+        mode: str = "parallel",
+        aggregator: str = "primary-wins",
+    ) -> tuple[dict[str, str], dict[str, Any] | None]:
         """Drive the one-retry LLM-call loop for the packaging file set.
 
-        Returns the parsed ``{path: content}`` dict on success.
+        Returns ``(files, panel_telemetry)``. ``panel_telemetry`` is
+        ``None`` when no panel is wired (preserving v2.0 ctx shape).
         Raises :class:`LayerGenerationError` if both attempts fail to
         parse.
         """
@@ -217,7 +235,11 @@ class PackagerStage(Stage):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        raw = await self._llm.chat(messages, temperature=0.2, max_tokens=8192)
+        raw, telemetry = await _chat_or_panel(
+            self._llm, self._reasoning_panel,
+            messages, temperature=0.2, max_tokens=8192,
+            mode=mode, aggregator=aggregator,
+        )
         parsed = parse_llm_json(raw)
 
         if parsed is None:
@@ -232,7 +254,11 @@ class PackagerStage(Stage):
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": RETRY_REMINDER},
             ]
-            raw = await self._llm.chat(messages, temperature=0.0, max_tokens=8192)
+            raw, telemetry = await _chat_or_panel(
+                self._llm, self._reasoning_panel,
+                messages, temperature=0.0, max_tokens=8192,
+                mode=mode, aggregator=aggregator,
+            )
             parsed = parse_llm_json(raw)
 
         if parsed is None:
@@ -249,7 +275,7 @@ class PackagerStage(Stage):
                 result[path] = content
             else:
                 result[path] = json.dumps(content, indent=2)
-        return result
+        return result, telemetry
 
     def _validate_files(
         self, files: dict[str, str]

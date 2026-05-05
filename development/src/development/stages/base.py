@@ -23,6 +23,57 @@ if TYPE_CHECKING:
     from ..reasoning_panel import ReasoningPanel
 
 
+async def _chat_or_panel(
+    llm: LLMClient,
+    panel: "ReasoningPanel | None",
+    messages: list[dict[str, Any]],
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    mode: str = "parallel",
+    aggregator: str = "primary-wins",
+) -> tuple[str, dict[str, Any] | None]:
+    """Stage helper: route a chat call through a panel when wired.
+
+    Returns ``(text, panel_telemetry)``. ``panel_telemetry`` is ``None``
+    on the no-panel path (preserving v2.0 ctx shape) and a
+    ``{"primary": ..., "partners": [{"name", "content", "ms", "error"}]}``
+    dict when the panel was consulted. The aggregated text is what
+    callers parse; per-slot raw outputs surface for observability.
+
+    Mirrors the byte-for-byte semantics of the canonical helper in
+    :class:`development.stages.reviewer.ReviewerStage._chat_or_panel`
+    so every stage that opts into the panel surfaces telemetry in the
+    same shape.
+    """
+    if panel is None:
+        text = await llm.chat(
+            messages, temperature=temperature, max_tokens=max_tokens
+        )
+        return text, None
+
+    result = await panel.consult(
+        messages,
+        mode=mode,
+        aggregator=aggregator,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    telemetry = {
+        "primary": result.primary.content,
+        "partners": [
+            {
+                "name": p.slot_name,
+                "content": p.content,
+                "ms": p.duration_ms,
+                "error": p.error,
+            }
+            for p in result.partners
+        ],
+    }
+    return result.aggregated, telemetry
+
+
 class Stage(ABC):
     """Single step in the build pipeline.
 

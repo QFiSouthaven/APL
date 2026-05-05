@@ -53,7 +53,7 @@ from ..messageboard import MessageBoard
 from ..types import STAGE_PROGRESS, LayerGenerationError
 from . import _runner as runner_module
 from ._workspace import TestWorkspace
-from .base import Stage
+from .base import Stage, _chat_or_panel
 
 logger = logging.getLogger("development.stages.tester")
 
@@ -122,13 +122,31 @@ class TesterStage(Stage):
             if isinstance(lp, dict)
         }
 
+        # Panel mode/aggregator come from BuildRequest (defaults match
+        # the Reviewer's). Last-call telemetry is captured into
+        # ``ctx["tester_panel"]`` so observers can inspect the most
+        # recent panel consultation; multi-layer builds overwrite the
+        # earlier layers' telemetry deliberately — Tester is a per-stage
+        # consultation, not a per-layer one.
+        request = ctx.get("build_request")
+        panel_mode = getattr(request, "panel_mode", None) or "parallel"
+        panel_aggregator = (
+            getattr(request, "panel_aggregator", None) or "primary-wins"
+        )
+        last_panel_telemetry: dict[str, Any] | None = None
+
         for layer_name, files in artifacts.items():
             layer_obj = layer_plans.get(layer_name.lower(), {"name": layer_name})
 
             # 1. Generate tests. On retry-exhaustion record `errored`
             #    for this layer and move on (other layers continue).
             try:
-                tests = await self._generate_tests(layer_name, layer_obj, files)
+                tests, telemetry = await self._generate_tests(
+                    layer_name, layer_obj, files,
+                    mode=panel_mode, aggregator=panel_aggregator,
+                )
+                if telemetry is not None:
+                    last_panel_telemetry = telemetry
             except LayerGenerationError as exc:
                 logger.warning(
                     "Tester: layer %r test-generation produced unparseable "
@@ -166,6 +184,8 @@ class TesterStage(Stage):
                 for path, content in layer_files.items()
             }
         ctx["test_results"] = test_results
+        if last_panel_telemetry is not None:
+            ctx["tester_panel"] = last_panel_telemetry
         return ctx
 
     # ── test generation ─────────────────────────────────────────────
@@ -175,19 +195,29 @@ class TesterStage(Stage):
         layer_name: str,
         layer_obj: dict[str, Any],
         files: dict[str, str],
-    ) -> dict[str, str]:
-        """Ask the LLM for a {path: content} test-file map.
+        *,
+        mode: str = "parallel",
+        aggregator: str = "primary-wins",
+    ) -> tuple[dict[str, str], dict[str, Any] | None]:
+        """Ask the LLM (or panel) for a {path: content} test-file map.
 
         Mirrors the layer-generator one-retry pattern: first attempt at
         temp=0.2, retry at temp=0.0 with a strict reminder. Raises
         :class:`LayerGenerationError` on second failure.
+
+        Returns ``(tests, panel_telemetry)``. ``panel_telemetry`` is
+        ``None`` when no panel is wired (preserving v2.0 ctx shape).
         """
         user_prompt = _build_user_prompt(layer_name, layer_obj, files)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        raw = await self._llm.chat(messages, temperature=0.2, max_tokens=4096)
+        raw, telemetry = await _chat_or_panel(
+            self._llm, self._reasoning_panel,
+            messages, temperature=0.2, max_tokens=4096,
+            mode=mode, aggregator=aggregator,
+        )
         parsed = parse_llm_json(raw)
 
         if parsed is None:
@@ -203,7 +233,11 @@ class TesterStage(Stage):
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": RETRY_REMINDER},
             ]
-            raw = await self._llm.chat(messages, temperature=0.0, max_tokens=4096)
+            raw, telemetry = await _chat_or_panel(
+                self._llm, self._reasoning_panel,
+                messages, temperature=0.0, max_tokens=4096,
+                mode=mode, aggregator=aggregator,
+            )
             parsed = parse_llm_json(raw)
 
         if parsed is None:
@@ -218,7 +252,7 @@ class TesterStage(Stage):
                 out[path] = content
             else:
                 out[path] = json.dumps(content, indent=2)
-        return out
+        return out, telemetry
 
     # ── execution + loopback ────────────────────────────────────────
 

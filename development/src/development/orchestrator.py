@@ -13,15 +13,24 @@ deployable artifacts. The previous defaults (Architect-only / Architect
 ``include_coder=True`` is preserved as a no-op flag to keep v0.2
 callsites compiling.
 
-v2.1: optional ``reasoning_panel``. When supplied to
-``Orchestrator.__init__``, the panel is threaded into every stage that
-opts in. **In v2.1 only the Reviewer wires the panel** — Architect,
-Coder, Tester, and Packager accept the kwarg (because ``Stage.__init__``
-declares it) but currently ignore it. v2.2 will extend wiring to the
-other stages once their panel-aware critique modes are designed. The
-panel's mode + aggregator come from ``BuildRequest.panel_mode`` /
-``panel_aggregator`` per-build, defaulting to ``parallel`` +
-``primary-wins``.
+v2.2: optional ``reasoning_panel``. When supplied to
+``Orchestrator.__init__``, the panel is threaded into EVERY stage in
+the default pipeline — Architect, Coder, Reviewer, Tester, and
+Packager all consult the panel for their primary LLM call when one is
+wired. (Coder uses the panel only for its first per-layer planning
+round in tool-use mode; subsequent tool-loop iterations use the bare
+provider — partner slots can't coherently emit tool_calls into the
+shared sandbox.) The panel's mode + aggregator come from
+``BuildRequest.panel_mode`` / ``panel_aggregator`` per-build, defaulting
+to ``parallel`` + ``primary-wins``.
+
+Per-stage telemetry surfaces in the build ctx:
+
+* ``ctx["architect_panel"]`` — last panel call from Architect
+* ``ctx["coder_panel"]``     — last layer's planning consult (tool-use only)
+* ``ctx["review"][layer]["panel"]`` — Reviewer's per-layer panel call
+* ``ctx["tester_panel"]``    — last layer's test-gen panel call
+* ``ctx["packager_panel"]``  — Packager's single panel call
 
 Stage order is load-bearing per the framework doc:
 - Architect produces ``ctx["plan"]``
@@ -97,19 +106,21 @@ class Orchestrator:
         # source compat with v0.2 callsites; pass ``stages=[ArchitectStage(...)]``
         # to restore the v0.1 single-stage shape if needed.
         #
-        # v2.1: ``reasoning_panel`` is threaded into every stage that
-        # accepts it. Currently only the Reviewer USES the panel — the
-        # others (Architect/Coder/Tester/Packager) accept the kwarg via
-        # ``Stage.__init__`` but ignore it pending v2.2 wiring.
+        # v2.2: ``reasoning_panel`` is threaded into EVERY default
+        # stage. Each stage's behavior when the panel is ``None`` is
+        # byte-for-byte identical to v2.0; with a panel wired the
+        # primary LLM call routes through ``panel.consult`` and per-stage
+        # telemetry surfaces in ``ctx["<stage>_panel"]`` (Reviewer keeps
+        # its per-layer ``ctx["review"][layer]["panel"]`` shape).
         if stages is not None:
             self._stages: list[Stage] = list(stages)
         else:
             self._stages = [
-                ArchitectStage(llm_client),
-                CoderStage(llm_client),
+                ArchitectStage(llm_client, reasoning_panel=reasoning_panel),
+                CoderStage(llm_client, reasoning_panel=reasoning_panel),
                 ReviewerStage(llm_client, reasoning_panel=reasoning_panel),
-                TesterStage(llm_client),
-                PackagerStage(llm_client),
+                TesterStage(llm_client, reasoning_panel=reasoning_panel),
+                PackagerStage(llm_client, reasoning_panel=reasoning_panel),
             ]
 
     @property
