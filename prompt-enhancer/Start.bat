@@ -1,7 +1,11 @@
 @echo off
-REM Start.bat — launch the Prompt Enhancer Desktop Studio.
+REM Start.bat — launch the Prompt Enhancer Desktop Studio (single sibling).
 REM Idempotent: re-creates venv if missing, re-installs deps if needed,
 REM warns if LM Studio is unreachable but lets the user proceed.
+REM
+REM For the FULL umbrella (prompt-enhancer + round-robin + development
+REM with cross-discovery), use:    python ..\lab\launch.py
+REM See ..\lab\README.md for details.
 
 setlocal
 cd /d "%~dp0"
@@ -30,7 +34,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM 3. Sanity check: LM Studio reachable.
+REM 3. First-run bootstrap: write services.toml if missing so the user
+REM    can discover/customize peer URLs without hunting for the path.
+REM    Silent on success; failure is non-fatal (just continues).
+python -m enhancer.cli.main services init >NUL 2>&1
+
+REM 4. Sanity check: LM Studio reachable.
 python -c "import httpx; httpx.get('http://127.0.0.1:1234/v1/models', timeout=3.0).raise_for_status()" 2>NUL
 if errorlevel 1 (
     echo.
@@ -40,10 +49,11 @@ if errorlevel 1 (
     pause >NUL
 )
 
-REM 4. Launch NiceGUI Desktop Studio.
+REM 5. Launch NiceGUI Desktop Studio.
 echo.
 echo Launching Prompt Enhancer Desktop Studio at http://127.0.0.1:8765
 echo (Ctrl+C in this window to stop)
+echo (For the full umbrella with round-robin + development, use ..\lab\launch.py)
 echo.
 python -m enhancer.cli.main ui
 
