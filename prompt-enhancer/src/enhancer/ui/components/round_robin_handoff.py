@@ -126,3 +126,84 @@ async def post_review(
         verdict=verdict if isinstance(verdict, dict) else {"raw": verdict},
         http_status=resp.status_code,
     )
+
+
+# ── persona handoff ────────────────────────────────────────────────────
+
+
+def build_persona_handoff_request(
+    *, theme: str, alpha_persona: str, bravo_persona: str
+) -> dict[str, Any]:
+    """Construct the JSON body for round-robin's ``/api/persona-handoff``.
+
+    Wire contract (per the Round-Robin v1.x spec):
+
+    ``{theme: str, alpha_persona: str, bravo_persona: str, source: str}``
+
+    ``theme`` carries the enhanced prompt (the conversation seed).
+    ``alpha_persona`` / ``bravo_persona`` are the two persona system
+    messages — Persona A is the primary (always present), Persona B is
+    the optional partner (the helper does NOT policy-block an empty
+    bravo; the UI decides whether to warn). ``source`` is fixed so the
+    receiver can route by origin product.
+    """
+    return {
+        "theme": theme or "",
+        "alpha_persona": alpha_persona or "",
+        "bravo_persona": bravo_persona or "",
+        "source": "prompt-enhancer",
+    }
+
+
+async def post_persona_handoff(
+    *,
+    theme: str,
+    alpha_persona: str,
+    bravo_persona: str,
+    peer_name: str = "round_robin",
+    timeout: float = 30.0,
+) -> HandoffResult:
+    """POST the two personas + theme to round-robin's ``/api/persona-handoff``.
+
+    Mirrors :func:`post_review`: same lookup via
+    :func:`enhancer.api.discovery.get_peer_url`, same ``HandoffResult``
+    failure taxonomy (``ok`` / ``peer_missing`` / ``unreachable`` /
+    ``http_error``). Unlike the review path, the success state has no
+    "verdict" — round-robin simply acknowledges receipt — so on 200 we
+    return ``HandoffResult(status="ok")`` and the UI renders no panel.
+
+    The helper does not policy-block an empty ``bravo_persona``; the UI
+    layer is responsible for warning the user that Bravo will keep its
+    pre-existing persona.
+    """
+    peer_url = get_peer_url(peer_name)
+    if not peer_url:
+        return HandoffResult(
+            status="peer_missing",
+            error=f"{peer_name} sibling not in services.toml",
+        )
+
+    body = build_persona_handoff_request(
+        theme=theme,
+        alpha_persona=alpha_persona,
+        bravo_persona=bravo_persona,
+    )
+    target = f"{peer_url}/api/persona-handoff"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(target, json=body)
+    except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError) as exc:
+        return HandoffResult(
+            status="unreachable",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+    if resp.status_code >= 400:
+        return HandoffResult(
+            status="http_error",
+            error=f"HTTP {resp.status_code}: {resp.text[:300]}",
+            http_status=resp.status_code,
+        )
+
+    # Persona handoff is fire-and-acknowledge: no verdict to surface.
+    return HandoffResult(status="ok", http_status=resp.status_code)

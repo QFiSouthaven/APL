@@ -21,7 +21,9 @@ import pytest
 from enhancer.ui.components import round_robin_handoff
 from enhancer.ui.components.round_robin_handoff import (
     HandoffResult,
+    build_persona_handoff_request,
     build_review_request,
+    post_persona_handoff,
     post_review,
 )
 
@@ -201,3 +203,144 @@ async def test_round_robin_handoff_http_error(monkeypatch) -> None:
 
     assert result.status == "http_error"
     assert result.http_status == 503
+
+
+# ─── persona handoff ──────────────────────────────────────────────────
+
+
+def test_persona_handoff_request_body_shape() -> None:
+    """The persona-handoff POST body must carry exactly the four fields
+    in the wire contract: ``theme``, ``alpha_persona``, ``bravo_persona``,
+    and the fixed ``source`` so round-robin can route by origin product.
+    """
+    body = build_persona_handoff_request(
+        theme="You are a tax-filing chatbot. ...",
+        alpha_persona="Persona A: senior tax accountant",
+        bravo_persona="Persona B: skeptical IRS auditor",
+    )
+
+    assert set(body.keys()) == {
+        "theme", "alpha_persona", "bravo_persona", "source",
+    }
+    assert body["theme"] == "You are a tax-filing chatbot. ..."
+    assert body["alpha_persona"] == "Persona A: senior tax accountant"
+    assert body["bravo_persona"] == "Persona B: skeptical IRS auditor"
+    assert body["source"] == "prompt-enhancer"
+
+
+@pytest.mark.asyncio
+async def test_persona_handoff_handles_missing_peer(monkeypatch) -> None:
+    """When the peer is absent from services.toml AND has no built-in
+    default, ``post_persona_handoff`` returns ``status='peer_missing'``
+    without making a network call.
+    """
+    monkeypatch.setattr(
+        round_robin_handoff, "get_peer_url",
+        lambda name: "",
+    )
+
+    result = await post_persona_handoff(
+        theme="enhanced", alpha_persona="A", bravo_persona="B",
+    )
+
+    assert isinstance(result, HandoffResult)
+    assert result.status == "peer_missing"
+    assert "services.toml" in result.error
+    assert result.verdict is None
+
+
+@pytest.mark.asyncio
+async def test_persona_handoff_ok_returns_status_ok(monkeypatch) -> None:
+    """200 from the peer → ``status='ok'``. Persona handoff is fire-and-
+    acknowledge, so there's no verdict to surface.
+    """
+    monkeypatch.setattr(
+        round_robin_handoff, "get_peer_url",
+        lambda name: "http://127.0.0.1:8766",
+    )
+    monkeypatch.setattr(
+        round_robin_handoff.httpx, "AsyncClient", _MockAsyncClient,
+    )
+    _MockAsyncClient.response = _MockResponse(
+        200, {"status": "ok", "stored_at": "2026-05-04T12:00:00Z"},
+    )
+
+    result = await post_persona_handoff(
+        theme="enhanced", alpha_persona="A", bravo_persona="B",
+    )
+
+    assert result.status == "ok"
+    assert result.http_status == 200
+    assert _MockAsyncClient.last_url == (
+        "http://127.0.0.1:8766/api/persona-handoff"
+    )
+    assert _MockAsyncClient.last_body is not None
+    assert _MockAsyncClient.last_body["alpha_persona"] == "A"
+    assert _MockAsyncClient.last_body["bravo_persona"] == "B"
+    assert _MockAsyncClient.last_body["source"] == "prompt-enhancer"
+
+
+@pytest.mark.asyncio
+async def test_persona_handoff_unreachable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        round_robin_handoff, "get_peer_url",
+        lambda name: "http://127.0.0.1:8766",
+    )
+    monkeypatch.setattr(
+        round_robin_handoff.httpx, "AsyncClient", _MockAsyncClient,
+    )
+    _MockAsyncClient.raise_exc = httpx.ConnectError("connection refused")
+
+    result = await post_persona_handoff(
+        theme="enhanced", alpha_persona="A", bravo_persona="B",
+    )
+
+    assert result.status == "unreachable"
+    assert "ConnectError" in result.error
+    assert result.verdict is None
+
+
+@pytest.mark.asyncio
+async def test_persona_handoff_http_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        round_robin_handoff, "get_peer_url",
+        lambda name: "http://127.0.0.1:8766",
+    )
+    monkeypatch.setattr(
+        round_robin_handoff.httpx, "AsyncClient", _MockAsyncClient,
+    )
+    _MockAsyncClient.response = _MockResponse(500, "internal error")
+
+    result = await post_persona_handoff(
+        theme="enhanced", alpha_persona="A", bravo_persona="B",
+    )
+
+    assert result.status == "http_error"
+    assert result.http_status == 500
+
+
+@pytest.mark.asyncio
+async def test_persona_handoff_works_with_empty_bravo(monkeypatch) -> None:
+    """The helper does NOT policy-block an empty Bravo — the UI is
+    responsible for warning the user. An empty bravo still POSTs and
+    the field is sent as an empty string.
+    """
+    monkeypatch.setattr(
+        round_robin_handoff, "get_peer_url",
+        lambda name: "http://127.0.0.1:8766",
+    )
+    monkeypatch.setattr(
+        round_robin_handoff.httpx, "AsyncClient", _MockAsyncClient,
+    )
+    _MockAsyncClient.response = _MockResponse(
+        200, {"status": "ok", "stored_at": "2026-05-04T12:00:00Z"},
+    )
+
+    result = await post_persona_handoff(
+        theme="enhanced", alpha_persona="A", bravo_persona="",
+    )
+
+    assert result.status == "ok"
+    assert _MockAsyncClient.last_body is not None
+    assert _MockAsyncClient.last_body["alpha_persona"] == "A"
+    assert _MockAsyncClient.last_body["bravo_persona"] == ""

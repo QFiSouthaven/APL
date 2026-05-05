@@ -32,7 +32,7 @@ from ...llm.registry import get_provider
 from ...persistence import runs as runs_module
 from ..components.diff_view import render_diff
 from ..components.pass_card import render_pass_card
-from ..components.round_robin_handoff import post_review
+from ..components.round_robin_handoff import post_persona_handoff, post_review
 from ..components.score_chips import render_score_chips
 from ..components.session_drawer import SessionDrawer, session_context_for
 from ..components.status_strip import StatusStrip
@@ -189,9 +189,18 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
                     rr_btn = ui.button(
                         "→ Round Robin", icon="reviews",
                     ).props("flat color=primary")
+                    # Persona handoff sits next to the review button. Distinct
+                    # color (secondary) and icon (groups) make it visually
+                    # different despite the shared "→ Round Robin" prefix.
+                    rr_persona_btn = ui.button(
+                        "→ Round Robin (Personas)", icon="groups",
+                    ).props("flat color=secondary")
                     rr_status = ui.label("").classes("text-caption text-grey")
                 rr_row.style("display: none;")
                 rr_verdict_container = ui.column().classes("w-full mt-1")
+                # Dual-persona display — populated post-run when both
+                # primary and partner personas are available.
+                persona_pair_container = ui.column().classes("w-full mt-2")
             with ui.expansion("Original ↔ Enhanced diff", icon="compare").classes("w-full"):
                 diff_container = ui.column()
 
@@ -210,6 +219,17 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
                     persona_sw = ui.switch("Persona mode", value=False)
                     magnitude_sw = ui.switch("Magnitude", value=False)
                     sot_sw = ui.switch("Skeleton-of-Thought", value=False)
+                with ui.row().classes("gap-4 items-center"):
+                    # Partner-persona is conceptually a child of persona-mode:
+                    # disable when the parent is off so the dependency is
+                    # visually obvious. (Bound via bind_enabled_from.)
+                    complement_persona_sw = ui.switch(
+                        "Generate partner persona (for Round Robin)",
+                        value=False,
+                    )
+                    complement_persona_sw.bind_enabled_from(
+                        persona_sw, "value",
+                    )
                 ui.label("Temperature").classes("text-caption")
                 temp_slider = ui.slider(min=0.0, max=2.0, step=0.05, value=settings.temperature)
                 ui.label("").bind_text_from(
@@ -361,6 +381,86 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
             )
 
     rr_btn.on_click(_on_round_robin_click)
+
+    def _render_persona_pair(
+        alpha: str, bravo: str | None
+    ) -> None:
+        """Render Persona A (primary) and, if present, Persona B (partner).
+
+        Distinct labels make the role explicit so the user knows which is
+        which when the two get shipped to round-robin.
+        """
+        persona_pair_container.clear()
+        if not alpha and not bravo:
+            return
+        with persona_pair_container:
+            with ui.element("div").classes("studio-card"):
+                ui.label("Persona A (primary)").classes(
+                    "text-caption text-grey"
+                )
+                ui.markdown(f"```\n{alpha or ''}\n```")
+            if bravo:
+                with ui.element("div").classes("studio-card"):
+                    ui.label("Persona B (partner)").classes(
+                        "text-caption text-grey"
+                    )
+                    ui.markdown(f"```\n{bravo}\n```")
+
+    async def _on_round_robin_personas_click() -> None:
+        result = state.get("last_result")
+        if result is None:
+            ui.notify("No completed run yet.", color="warning")
+            return
+        alpha = getattr(result, "persona", None) or ""
+        if not alpha:
+            ui.notify(
+                "No Persona A — enable Persona mode and re-run before "
+                "handing off.",
+                color="warning",
+            )
+            return
+        bravo = getattr(result, "persona_partner", None) or ""
+        if not bravo:
+            ui.notify(
+                "Sending Persona A only; Bravo will keep its existing "
+                "persona.",
+                color="warning",
+            )
+
+        rr_persona_btn.disable()
+        rr_status.set_text("Handing off personas…")
+        try:
+            outcome = await post_persona_handoff(
+                theme=getattr(result, "result", "") or "",
+                alpha_persona=alpha,
+                bravo_persona=bravo,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface unexpected errors
+            ui.notify(
+                f"Persona handoff failed: {exc}", color="negative"
+            )
+            rr_status.set_text("")
+            rr_persona_btn.enable()
+            return
+
+        rr_status.set_text("")
+        rr_persona_btn.enable()
+
+        if outcome.status == "ok":
+            ui.notify("Personas delivered to Round Robin.", color="positive")
+        elif outcome.status == "peer_missing":
+            ui.notify(outcome.error, color="warning")
+        elif outcome.status == "unreachable":
+            ui.notify(
+                f"Round-robin unreachable: {outcome.error}",
+                color="negative",
+            )
+        else:  # http_error or anything else
+            ui.notify(
+                f"Round-robin error: {outcome.error}", color="negative"
+            )
+
+    rr_persona_btn.on_click(_on_round_robin_personas_click)
 
     def _add_pass_card(**kwargs) -> ui.element:
         # Wire ↗ Branch from here onto every completed pass 1-3 card.
@@ -556,6 +656,7 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
         diff_container.clear()
         final_scores_row.clear()
         rr_verdict_container.clear()
+        persona_pair_container.clear()
         rr_row.style("display: none;")
         rr_status.set_text("")
         final_md.set_content("_(streaming…)_")
@@ -593,21 +694,32 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
 
         run_btn.disable()
         try:
+            opts_kwargs: dict[str, Any] = dict(
+                scorer_model=scorer_select.value or None,
+                persona_mode=persona_sw.value,
+                magnitude_mode=magnitude_sw.value,
+                sot_mode=sot_sw.value,
+                temperature=temp_slider.value,
+                max_tokens_scale=tokens_slider.value,
+                session_id=drawer.active_id,
+                parent_run_id=(branch or {}).get("parent_run_id"),
+                branch_from_pass=(branch or {}).get("branch_from_pass"),
+                branch_db_path=db_path() if branch else None,
+            )
+            # complement_persona may not exist yet on PipelineOptions if
+            # Agent A's pipeline change hasn't merged. Pass it only if the
+            # dataclass has the field, so we don't crash on TypeError.
+            if (
+                "complement_persona"
+                in getattr(PipelineOptions, "__dataclass_fields__", {})
+            ):
+                opts_kwargs["complement_persona"] = (
+                    persona_sw.value and complement_persona_sw.value
+                )
             result = await run_pipeline(
                 prompt,
                 provider=provider, model=chosen_model,
-                opts=PipelineOptions(
-                    scorer_model=scorer_select.value or None,
-                    persona_mode=persona_sw.value,
-                    magnitude_mode=magnitude_sw.value,
-                    sot_mode=sot_sw.value,
-                    temperature=temp_slider.value,
-                    max_tokens_scale=tokens_slider.value,
-                    session_id=drawer.active_id,
-                    parent_run_id=(branch or {}).get("parent_run_id"),
-                    branch_from_pass=(branch or {}).get("branch_from_pass"),
-                    branch_db_path=db_path() if branch else None,
-                ),
+                opts=PipelineOptions(**opts_kwargs),
                 on_event=_on_event,
                 session_context=session_ctx,
                 request_timeout=live_settings.request_timeout,
@@ -666,6 +778,11 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
         final_md.set_content(f"```\n{result.result}\n```")
         with diff_container:
             render_diff(prompt, result.result)
+        # Render Persona A / Persona B side-by-side if either is present.
+        _render_persona_pair(
+            getattr(result, "persona", None) or "",
+            getattr(result, "persona_partner", None) or "",
+        )
         # Reveal the Round Robin handoff button now that we have a result.
         rr_row.style("display: flex;")
         run_btn.enable()
