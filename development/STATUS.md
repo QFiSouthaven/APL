@@ -20,28 +20,16 @@ and `APL/docs/ARCHITECTURE_VISION.md` (umbrella cross-reference).
 | 7 — Web UI | ✅ done | Vanilla HTML/CSS/JS dark-themed. Build form, live event chips, expandable result panel. ~470 lines, zero deps. |
 | 8 — Integration testing | ✅ done | `@pytest.mark.integration` test exercises the full 5-stage pipeline against a real LM Studio. Auto-skipped when LM Studio unreachable or no chat model loaded. |
 
-## Test status (re-run 2026-05-04, Python 3.12 dev venv, v2.0.0)
+## Test status (re-run 2026-05-04, Python 3.12 dev venv, v2.2.0)
 
 ```
-tests/test_architect_stage.py    6 passed   (JSON parse paths + retry)
-tests/test_coder_stage.py       13 passed   (per-layer dispatch + skips)
-tests/test_discovery.py          7 passed   (byte-for-byte mirror of prompt-enhancer)
-tests/test_endpoints.py          9 passed   (/api/health, /api/peers, /api/build, /api/runs, /api/events)
-tests/test_layer_generators.py  25 passed   (3 per generator × 4 + parser unit tests)
-tests/test_messageboard.py       8 passed   (publish/subscribe/recent + threading)
-tests/test_orchestrator.py       8 passed   (default 5-stage pipeline + chain semantics)
-tests/test_packager_stage.py    21 passed   (5 stack permutations + 4 validator paths)
-tests/test_reviewer_stage.py    12 passed   (bounded loopback + parse fallback)
-tests/test_sse_events.py         9 passed   (SSE wire format + reconnect)
-tests/test_static_ui.py          4 passed   (HTML well-formed + endpoint references)
-tests/test_tester_stage.py      16 passed   (15 fast + 1 slow real-pytest)
-tests/test_integration_lmstudio.py 1 passed (helper) + 1 deselected (real LM Studio; opt-in via -m integration)
-tests/test_tools.py             19 passed   (filesystem/git/exec sandbox + traversal guards)
-tests/test_coder_tool_use.py     8 passed   (tool_use opt-in + budget cap + dispatch)
-tests/test_stack_templates.py   21 passed   (discover_templates + fastapi-sqlite + Architect fast-path)
-tests/test_round_robin_reviewer.py 15 passed (alternate reviewer + deferred-mode fallback)
+pytest -q -m "not slow and not integration"
                                 ─────────
-                                202 passed, 1 deselected in 11.31s
+                                222 passed, 2 deselected in 11.15s
+
+(includes v2.1: test_reasoning_panel_wiring.py — Reviewer panel telemetry,
+ and v2.2: test_panel_wiring_all_stages.py — panel routing through
+ Architect/Coder/Tester/Packager + orchestrator threading.)
 ```
 
 **Run integration:** with LM Studio loaded, `pytest -m integration` against this component exercises the full pipeline end-to-end.
@@ -65,16 +53,25 @@ tests/test_round_robin_reviewer.py 15 passed (alternate reviewer + deferred-mode
 |---|---|---|
 | MCP-style tools in Coder | ✅ done | Opt-in `tool_use=True`. Catalog: `fs_read`, `fs_list`, `git_status`, `git_log`, `git_diff`, `sandboxed_exec`. Hard cap 5 tool calls/layer. Per-layer `tempfile.TemporaryDirectory` sandbox. `_ALLOWED_BINS` whitelist for shell exec. Default `tool_use=False` preserves v1.0 behavior. |
 | Stack templates entry-point | ✅ done | `discover_templates()` walks `development.stack_templates` group. Built-in `fastapi-sqlite` template registered same way third parties will. Architect fast-path skips LLM when hint matches a registered template. |
-| Round-robin reviewer alternate | ✅ done | `BuildRequest.reviewer = "round-robin"` swaps the Reviewer for `RoundRobinReviewer` per-build. Deferred-mode fallback: round-robin's `/api/review` doesn't exist yet, so each layer falls back to single-pass with a `STAGE_PROGRESS` event noting `deferred=True`. Shared `_reviewer_loopbacks` budget across both reviewer kinds. |
+| Round-robin reviewer alternate | ✅ done | `BuildRequest.reviewer = "round-robin"` swaps the Reviewer for `RoundRobinReviewer` per-build. Round-robin's `/api/review` shipped (v2.1) — deferred-mode fallback only triggers on connection failure now. Shared `_reviewer_loopbacks` budget across both reviewer kinds. |
+
+## v2.1 + v2.2 additions
+
+| Capability | Status | Notes |
+|---|---|---|
+| ReasoningPanel in Reviewer (v2.1) | ✅ done | `Stage.__init__` accepts `reasoning_panel`; Reviewer routes critique through `panel.consult` when supplied. Per-slot raw outputs surface in `ctx["review"][layer]["panel"]` with `{primary, partners: [...]}` shape. |
+| ReasoningPanel in all 5 stages (v2.2) | ✅ done | Architect/Coder/Tester/Packager all route LLM calls through the panel when supplied. Coder's tool_use=True flow does ONE planning consult per layer before the tool loop runs unchanged (partners can't coherently emit tool_calls into a shared sandbox). Default `reasoning_panel=None` everywhere preserves v2.0 behavior. |
 
 ## Roadmap forward
 
 ```
 v1.0  ✅ five-stage pipeline + integration test
-v2.0  ✅ MCP tools + stack templates + round-robin reviewer       ← YOU ARE HERE
+v2.0  ✅ MCP tools + stack templates + round-robin reviewer
+v2.1  ✅ ReasoningPanel wired into Reviewer
+v2.2  ✅ ReasoningPanel wired into all 5 stages                    ← YOU ARE HERE
 v2.x  ⏳ extracted-to-shared-lib LLM provider (apl-llm)
        + pluggable stage discovery
        + plan-format schema_version migrations
-       + native LMStudio chat_with_tools (provider method, not message-fallback)
-       + round-robin /api/review endpoint to flip the deferred-mode fallback
+       + native LMStudio chat_with_tools (provider method, not message-fallback)  ✅ shipped in prompt-enhancer v2.1
+       + Pass 3 streaming-panel aggregation
 ```
