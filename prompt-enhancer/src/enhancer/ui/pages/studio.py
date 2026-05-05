@@ -32,6 +32,7 @@ from ...llm.registry import get_provider
 from ...persistence import runs as runs_module
 from ..components.diff_view import render_diff
 from ..components.pass_card import render_pass_card
+from ..components.round_robin_handoff import post_review
 from ..components.score_chips import render_score_chips
 from ..components.session_drawer import SessionDrawer, session_context_for
 from ..components.status_strip import StatusStrip
@@ -182,6 +183,15 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
                 ui.label("Final enhanced prompt").classes("text-caption text-grey")
                 final_md = ui.markdown("_(run a prompt to see output)_")
                 final_scores_row = ui.row().classes("gap-1")
+                # Round-robin handoff: button + inline verdict panel.
+                # Hidden until a run completes (state["last_result"] set).
+                with ui.row().classes("gap-2 items-center mt-2") as rr_row:
+                    rr_btn = ui.button(
+                        "→ Round Robin", icon="reviews",
+                    ).props("flat color=primary")
+                    rr_status = ui.label("").classes("text-caption text-grey")
+                rr_row.style("display: none;")
+                rr_verdict_container = ui.column().classes("w-full mt-1")
             with ui.expansion("Original ↔ Enhanced diff", icon="compare").classes("w-full"):
                 diff_container = ui.column()
 
@@ -284,6 +294,73 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
             f"{parent_id[:8]} @ Pass {pass_number}.",
             color="info",
         )
+
+    def _render_verdict(verdict: dict[str, Any]) -> None:
+        """Render a ReviewVerdict {decision, summary, issues, regenerate}."""
+        rr_verdict_container.clear()
+        decision = str(verdict.get("decision", "?")).upper()
+        summary = str(verdict.get("summary", ""))
+        issues = verdict.get("issues") or []
+        regenerate = bool(verdict.get("regenerate", False))
+        # Color the decision chip — green for pass-y verdicts, amber otherwise.
+        good = decision in {"PASS", "OK", "APPROVE", "APPROVED", "GO"}
+        with rr_verdict_container:
+            with ui.element("div").classes("studio-card"):
+                with ui.row().classes("gap-2 items-center"):
+                    ui.label(f"Round-Robin: {decision}").classes(
+                        "text-body1 text-white"
+                    ).style(
+                        f"color: {'#4ade80' if good else '#fbbf24'};"
+                    )
+                    if regenerate:
+                        ui.label("regenerate=true").classes(
+                            "text-caption"
+                        ).style("color: #f87171;")
+                if summary:
+                    ui.label(summary).classes("text-body2 text-grey")
+                if issues:
+                    ui.label("Issues:").classes("text-caption mt-1")
+                    with ui.column().classes("gap-0 ml-3"):
+                        for item in issues:
+                            ui.label(f"• {item}").classes("text-caption text-grey")
+
+    async def _on_round_robin_click() -> None:
+        result = state.get("last_result")
+        if result is None:
+            ui.notify("No completed run yet.", color="warning")
+            return
+        rr_btn.disable()
+        rr_status.set_text("Reviewing…")
+        rr_verdict_container.clear()
+        try:
+            outcome = await post_review(
+                original_prompt=(prompt_input.value or "").strip(),
+                enhanced=getattr(result, "result", "") or "",
+            )
+        except Exception as exc:  # noqa: BLE001 — surface unexpected errors
+            ui.notify(f"Round-robin handoff failed: {exc}", color="negative")
+            rr_status.set_text("")
+            rr_btn.enable()
+            return
+
+        rr_status.set_text("")
+        rr_btn.enable()
+
+        if outcome.status == "ok" and outcome.verdict is not None:
+            _render_verdict(outcome.verdict)
+            ui.notify("Round-robin verdict received.", color="positive")
+        elif outcome.status == "peer_missing":
+            ui.notify(outcome.error, color="warning")
+        elif outcome.status == "unreachable":
+            ui.notify(
+                f"Round-robin unreachable: {outcome.error}", color="negative"
+            )
+        else:  # http_error or anything else
+            ui.notify(
+                f"Round-robin error: {outcome.error}", color="negative"
+            )
+
+    rr_btn.on_click(_on_round_robin_click)
 
     def _add_pass_card(**kwargs) -> ui.element:
         # Wire ↗ Branch from here onto every completed pass 1-3 card.
@@ -478,6 +555,9 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
         state["log_container"].clear()
         diff_container.clear()
         final_scores_row.clear()
+        rr_verdict_container.clear()
+        rr_row.style("display: none;")
+        rr_status.set_text("")
         final_md.set_content("_(streaming…)_")
         mag_md.set_content("_(magnitude pending)_" if magnitude_sw.value else "_(off)_")
         sot_md.set_content("_(sot pending)_" if sot_sw.value else "_(off)_")
@@ -586,6 +666,8 @@ def render() -> None:  # noqa: C901, PLR0915 — page assembly
         final_md.set_content(f"```\n{result.result}\n```")
         with diff_container:
             render_diff(prompt, result.result)
+        # Reveal the Round Robin handoff button now that we have a result.
+        rr_row.style("display: flex;")
         run_btn.enable()
         state["running"] = False
         ui.notify(
