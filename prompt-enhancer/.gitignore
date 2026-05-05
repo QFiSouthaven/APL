@@ -40,6 +40,7 @@ agent_pipeline.log
 enhancer_sessions.json
 model_config.json
 tools/reviews/*.md
+tools/reviews/*.json
 !tools/reviews/.gitkeep
 
 # Packaging — keep the .spec under version control (it IS the build recipe)
